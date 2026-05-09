@@ -1,0 +1,27 @@
+{
+  "name": "graymatter",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@jackstenglein/pgn-parser": "^2.0.13",
+    "chess.js": "^1.0.0",
+    "react": "^19.0.0",
+    "react-chessboard": "^4.7.3",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.14",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.14",
+    "typescript": "~5.7.3",
+    "vite": "^6.2.0"
+  }
+}
