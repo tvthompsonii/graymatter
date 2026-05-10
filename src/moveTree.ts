@@ -90,47 +90,6 @@ export function legalChildSans(game: Chess, node: Node): string[] {
   return out
 }
 
-// Autoplays opponent moves (random when branching) until the player must choose among multiple book replies or the line ends.
-// Arguments: args.game — current position (mutated); args.node — trie node at the branch point; args.playerSide — side the human plays so we stop before forcing them to pick among several SANs.
-export function randomRollToLeaf(args: {
-  game: Chess
-  node: Node
-  playerSide: 'w' | 'b'
-}): string[] {
-  const { game: g, playerSide } = args
-  let node = args.node
-  const suffix: string[] = []
-
-  for (;;) {
-    if (node.children.size === 0) break
-
-    const choices = legalChildSans(g, node)
-    if (choices.length === 0) break
-
-    const turn = g.turn()
-
-    let san: string
-    if (turn === playerSide) {
-      if (choices.length > 1) break
-      san = choices[0]!
-    }
-    else {
-      san =
-        choices.length === 1
-          ? choices[0]!
-          : choices[Math.floor(Math.random() * choices.length)]!
-    }
-
-    if (!applySan(g, san)) break
-    suffix.push(san)
-    const next = node.children.get(san)
-    if (!next) break
-    node = next
-  }
-
-  return suffix
-}
-
 // Visits every trie node once in deterministic DFS order (sorted child SANs) for exports, resets, and debug logs.
 // Arguments: root — trie root; fn — callback receiving each node and the SAN path from root to that node.
 export function forEachNodeDepthFirst(root: Node, fn: (n: Node, pathSans: readonly string[]) => void): void {

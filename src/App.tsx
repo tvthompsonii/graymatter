@@ -3,6 +3,7 @@ import { Chess, type Move } from 'chess.js'
 import type { ChangeEvent } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Chessboard } from 'react-chessboard'
+import type { PieceDropHandlerArgs, PieceHandlerArgs } from 'react-chessboard'
 
 import {
   applySan,
@@ -10,7 +11,6 @@ import {
   fenSig,
   legalChildSans,
   logRepertoireTreeDfs,
-  randomRollToLeaf,
   resetNeedsPractice,
   walkToNode,
   type Node,
@@ -154,48 +154,71 @@ export default function App() {
   }, [])
 
   // If the SAN history is a repertoire leaf, records that terminal path as done and flips needsPractice on that node.
+  // Returns true when this call newly added the path to completedPathKeysRef (first time finishing that line).
   // Arguments: none (uses treeRef, historySansRef, terminalPathKeysRef).
-  const tryMarkLeafCompleted = () => {
+  const tryMarkLeafCompleted = (): boolean => {
     const root = treeRef.current
-    if (!root) return
+    if (!root) return false
     const keys = terminalPathKeysRef.current
     const hist = historySansRef.current
     const k = canonicalPathKey(hist)
+    const already = completedPathKeysRef.current.has(k)
     const n = walkToNode(root, hist)
     if (n && n.children.size === 0 && (!keys.size || keys.has(k))) {
       completedPathKeysRef.current.add(k)
       n.needsPractice = false
+      rebuildStatus()
+      return !already
     }
     rebuildStatus()
+    return false
   }
 
-  // Rebuilds the live chess.js instance and SAN history from a prefix (used after branch autoplay rewinds the board).
-  // Arguments: sans — moves to replay from the start position in order.
-  const replaySansOnGame = (sans: string[]) => {
+  // Puts the drill back at the start position (and White’s first move when training as Black), without clearing session progress.
+  // Arguments: none (uses treeRef, playerSide).
+  const applyLessonStartPosition = () => {
+    const root = treeRef.current
+    if (!root) return
     const g = new Chess()
     gameRef.current = g
     historySansRef.current = []
-    for (const san of sans) {
-      if (!applySan(g, san)) break
-      historySansRef.current.push(san)
+    if (playerSide === 'b') {
+      const rootNode = walkToNode(root, [])
+      if (!rootNode) return
+      const firstChoices = legalChildSans(g, rootNode).sort()
+      const first = firstChoices[0]
+      if (!first) return
+      applySan(g, first)
+      historySansRef.current.push(first)
     }
     setFen(g.fen())
   }
 
   // After any half-move, auto-plays forced opponent moves, handles multi-reply drill branches, and marks completed leaves.
-  // Arguments: none (uses treeRef, gameRef, historySansRef, playerSide, branchDrillsRef, terminalPathKeysRef; calls tryMarkLeafCompleted, replaySansOnGame, rebuildStatus).
-  const settleAfterChange = useCallback(() => {
+  // Arguments: none (reads tree/game/history/playerSide refs and state).
+  const settleAfterChange = useCallback(async () => {
     const root = treeRef.current
     if (!root) return
 
     const g = gameRef.current
 
     while (true) {
-      tryMarkLeafCompleted()
+      const newlyCompletedLine = tryMarkLeafCompleted()
       const hist = historySansRef.current
 
       const node = walkToNode(root, hist)
-      if (!node?.children?.size) break
+      if (!node || node.children.size === 0) {
+        if (
+          newlyCompletedLine
+          && completedPathKeysRef.current.size < terminalLineCountRef.current
+        ) {
+          applyLessonStartPosition()
+          setBoardResetKey((k) => k + 1)
+          await settleAfterChange()
+          return
+        }
+        break
+      }
 
       const outs = legalChildSans(g, node)
       if (outs.length === 0) break
@@ -203,30 +226,7 @@ export default function App() {
       if (g.turn() === playerSide) break
 
       if (outs.length > 1) {
-        const branchHist = [...hist]
         const branchSig = fenSig(g.fen())
-        const nodeAtBranch = node
-
-        const rollSuffix = randomRollToLeaf({
-          game: g,
-          node: nodeAtBranch,
-          playerSide,
-        })
-
-        const pathDone = [...branchHist, ...rollSuffix]
-        const endWalk = walkToNode(root, pathDone)
-        const tk = canonicalPathKey(pathDone)
-        if (
-          endWalk
-          && endWalk.children.size === 0
-          && (!terminalPathKeysRef.current.size || terminalPathKeysRef.current.has(tk))
-        ) {
-          completedPathKeysRef.current.add(tk)
-          endWalk.needsPractice = false
-        }
-
-        replaySansOnGame(branchHist)
-
         const g2 = gameRef.current
         const restoredNode = walkToNode(root, historySansRef.current)
         if (!restoredNode) {
@@ -260,8 +260,9 @@ export default function App() {
         applySan(g2, nextSan)
         historySansRef.current.push(nextSan)
         rebuildStatus()
+        setFen(gameRef.current.fen())
 
-        settleAfterChange()
+        await settleAfterChange()
         setFen(gameRef.current.fen())
         return
       }
@@ -269,16 +270,16 @@ export default function App() {
       const san = outs[0]!
       applySan(g, san)
       historySansRef.current.push(san)
+      setFen(g.fen())
     }
 
     tryMarkLeafCompleted()
-    rebuildStatus()
     setFen(g.fen())
   }, [playerSide, rebuildStatus])
 
   // Resets the session board from the start (and plays White’s first move when training as Black if needed).
   // Arguments: none (uses treeRef, playerSide, settleAfterChange).
-  const bootstrap = useCallback(() => {
+  const bootstrap = useCallback(async () => {
     const root = treeRef.current
     if (!root) {
       gameRef.current = new Chess()
@@ -289,9 +290,6 @@ export default function App() {
     }
 
     const g = new Chess()
-    gameRef.current = g
-    historySansRef.current = []
-
     if (playerSide === 'b') {
       const rootNode = walkToNode(root, [])
       if (!rootNode) {
@@ -304,12 +302,10 @@ export default function App() {
         setParseError('No White first move in repertoire.')
         return
       }
-      applySan(g, first)
-      historySansRef.current.push(first)
     }
 
-    setFen(g.fen())
-    settleAfterChange()
+    applyLessonStartPosition()
+    await settleAfterChange()
   }, [playerSide, settleAfterChange])
 
   // Re-mounts the drill from a clean board when the player switches White/Black (or after bootstrap definition changes).
@@ -321,8 +317,10 @@ export default function App() {
       setFen(gameRef.current.fen())
       return
     }
-    bootstrap()
-    setBoardResetKey((k) => k + 1)
+    void (async () => {
+      await bootstrap()
+      setBoardResetKey((k) => k + 1)
+    })()
   }, [playerSide, bootstrap])
 
   // Parses PGN text into the trie, resets session refs, logs the tree, downloads training JSON, and starts bootstrap.
@@ -358,8 +356,10 @@ export default function App() {
       const base = (name ?? 'repertoire').replace(/\.[^.]+$/, '')
       triggerJsonDownload(serializeTrainingStatus(res.root), `${base}-training.json`)
 
-      bootstrap()
-      setBoardResetKey((k) => k + 1)
+      void (async () => {
+        await bootstrap()
+        setBoardResetKey((k) => k + 1)
+      })()
     },
     [bootstrap],
   )
@@ -392,12 +392,13 @@ export default function App() {
   }
 
   // Validates a drag against the repertoire at the current node, applies it, then runs opponent autoplay logic.
-  // Arguments: sourceSquare, targetSquare — drag endpoints; piece — react-chessboard piece id (color prefix used).
+  // Arguments: v5 `PieceDropHandlerArgs` — piece.pieceType is like `wP`; targetSquare is null when dropped off the board.
   const onPieceDrop = useCallback(
-    (sourceSquare: string, targetSquare: string, piece: string): boolean => {
-      if (!treeRef.current) return false
+    ({ piece, sourceSquare, targetSquare }: PieceDropHandlerArgs): boolean => {
+      if (!treeRef.current || !targetSquare) return false
 
-      const colorLetter = piece[0] === 'w' ? ('w' as const) : ('b' as const)
+      const pieceType = piece.pieceType
+      const colorLetter = pieceType[0] === 'w' ? ('w' as const) : ('b' as const)
       if (colorLetter !== playerSide) return false
 
       const g = gameRef.current
@@ -429,11 +430,27 @@ export default function App() {
 
       historySansRef.current.push(mv.san)
 
-      settleAfterChange()
       setFen(gameRef.current.fen())
+      void settleAfterChange()
       return true
     },
     [playerSide, settleAfterChange],
+  )
+
+  // v5: only allow dragging when the repertoire still has a legal reply here (no grab cursor at true line ends).
+  // Arguments: v5 `PieceHandlerArgs` — `piece.pieceType` is e.g. `wP`; `square` is the source square (or null for spare pieces).
+  const canDragFromRepertoire = useCallback(
+    ({ piece: p }: PieceHandlerArgs) => {
+      if (p.pieceType[0] !== playerSide) return false
+      const root = treeRef.current
+      if (!root) return false
+      const g = gameRef.current
+      if (g.turn() !== playerSide) return false
+      const n = walkToNode(root, historySansRef.current)
+      if (!n || n.children.size === 0) return false
+      return legalChildSans(g, n).length > 0
+    },
+    [playerSide],
   )
 
   // Reads the user’s PGN file from disk and hands the text to loadRepertoire (clears input value so same file can re-pick).
@@ -458,8 +475,10 @@ export default function App() {
     completedPathKeysRef.current = new Set()
     branchDrillsRef.current = new Map()
     resetNeedsPractice(treeRef.current)
-    bootstrap()
-    setBoardResetKey((k) => k + 1)
+    void (async () => {
+      await bootstrap()
+      setBoardResetKey((k) => k + 1)
+    })()
   }
 
   return (
@@ -475,8 +494,9 @@ export default function App() {
               PGN loads, the trie is printed depth-first in the console, and a JSON file is downloaded mapping each
               node&apos;s <code className="text-slate-300">canonicalPathKey</code> (SAN path from the root) to{' '}
               <code className="text-slate-300">needsPractice</code>. You can load that file later to restore flags
-              on the current tree. Drills use the trie only: opponent branches autoplay at random to a leaf, then
-              the board returns to the branch until every terminal path has been seen once.
+              on the current tree. Where the repertoire branches, opponents cycle sidelines so you practise each
+              path; progress counts when your move list reaches a terminal line yourself. Finishing a line while others
+              remain returns the board to the start for the next one (session progress is kept).
             </p>
             <p className="mt-2 font-mono text-xs text-slate-500">
               Version {APP_VERSION}
@@ -577,18 +597,19 @@ export default function App() {
         <div className="w-full max-w-[min(100%,28rem)] shrink-0 self-center md:self-start">
           <Chessboard
             key={boardResetKey}
-            id="OpeningTrainerBoard"
-            position={fen}
-            boardOrientation={playerSide === 'w' ? 'white' : 'black'}
-            onPieceDrop={onPieceDrop}
-            autoPromoteToQueen
-            isDraggablePiece={({ piece }) => piece[0] === playerSide}
-            customBoardStyle={{
-              borderRadius: '0.75rem',
-              boxShadow: '0 25px 50px -12px rgba(0,0,0,0.65)',
+            options={{
+              id: 'OpeningTrainerBoard',
+              position: fen,
+              boardOrientation: playerSide === 'w' ? 'white' : 'black',
+              onPieceDrop,
+              canDragPiece: canDragFromRepertoire,
+              boardStyle: {
+                borderRadius: '0.75rem',
+                boxShadow: '0 25px 50px -12px rgba(0,0,0,0.65)',
+              },
+              darkSquareStyle: { backgroundColor: '#64748b' },
+              lightSquareStyle: { backgroundColor: '#cbd5e1' },
             }}
-            customDarkSquareStyle={{ backgroundColor: '#64748b' }}
-            customLightSquareStyle={{ backgroundColor: '#cbd5e1' }}
           />
         </div>
       </div>

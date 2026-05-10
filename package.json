@@ -12,7 +12,7 @@
     "@jackstenglein/pgn-parser": "^2.0.13",
     "chess.js": "^1.0.0",
     "react": "^19.0.0",
-    "react-chessboard": "^4.7.3",
+    "react-chessboard": "^5.10.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
