@@ -10,16 +10,10 @@
   },
   "dependencies": {
     "@jackstenglein/pgn-parser": "^2.0.13",
-    "chess.js": "^1.0.0",
-    "react": "^19.0.0",
-    "react-chessboard": "^5.10.0",
-    "react-dom": "^19.0.0"
+    "chess.js": "^1.0.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.14",
-    "@types/react": "^19.0.10",
-    "@types/react-dom": "^19.0.4",
-    "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.0.14",
     "typescript": "~5.7.3",
     "vite": "^6.2.0"
