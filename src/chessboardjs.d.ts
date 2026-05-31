@@ -32,6 +32,7 @@ interface ChessboardConfig {
     target: ChessboardSquare,
     piece: ChessboardPiece,
   ) => void
+  onMoveEnd?: (oldPos: ChessboardPosition, newPos: ChessboardPosition) => void
 }
 
 interface ChessboardInstance {

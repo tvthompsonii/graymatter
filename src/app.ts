@@ -22,7 +22,8 @@ import {
 type Side = 'w' | 'b'
 
 const PIECE_THEME = '/staunty/{piece}.svg'
-  //'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
+/** Must match chessboard `moveSpeed`; used as fallback when onMoveEnd does not fire. */
+const BOARD_MOVE_MS = 300
 
 // Strips check/mate decorations so we can match user drags to repertoire SAN lists that omit +/#.
 function normalizeSan(san: string): string {
@@ -140,6 +141,8 @@ export class OpeningTrainer {
   private board: ChessboardInstance | null = null
   /** Run opponent autoplay after the user’s drop snap finishes (onSnapEnd). */
   private settleAfterSnap = false
+  private settling = false
+  private finishMoveAnimation: (() => void) | null = null
 
   private readonly els = {
     version: document.getElementById('app-version')!,
@@ -189,9 +192,11 @@ export class OpeningTrainer {
       orientation: this.playerSide === 'w' ? 'white' : 'black',
       draggable: true,
       pieceTheme: PIECE_THEME,
+      moveSpeed: BOARD_MOVE_MS,
       onDragStart: (source, piece) => this.onDragStart(source, piece),
       onDrop: (source, target) => this.onDrop(source, target),
       onSnapEnd: (source, target) => this.onSnapEnd(source, target),
+      onMoveEnd: () => this.finishMoveAnimation?.(),
     })
   }
 
@@ -200,26 +205,55 @@ export class OpeningTrainer {
     this.board?.position(this.game.fen(), false)
   }
 
-  // Opponent / book plies: chessboard.js move() only (never position()).
-  private playMoveOnBoard(mv: Move): void {
+  // Resolves when the current board.move() animation finishes (onMoveEnd).
+  private waitForBoardAnimation(): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        if (this.finishMoveAnimation === finish) this.finishMoveAnimation = null
+        resolve()
+      }
+      this.finishMoveAnimation = finish
+      window.setTimeout(finish, BOARD_MOVE_MS + 80)
+    })
+  }
+
+  // One animated ply via chessboard.js move() only (never position()).
+  private async playMoveOnBoardAsync(mv: Move): Promise<void> {
     if (!this.board) return
+    const anim = this.waitForBoardAnimation()
     const rook = companionRookCastleMove(mv)
     if (rook) this.board.move(`${mv.from}-${mv.to}`, rook)
     else this.board.move(`${mv.from}-${mv.to}`)
+    await anim
   }
 
-  // Applies SAN to chess.js, then animates that single ply on the board.
-  private applyBookSanAnimated(san: string): boolean {
+  // Applies SAN to chess.js, then plays one animated ply and waits before the next.
+  private async applyBookSanAnimated(san: string): Promise<boolean> {
     try {
       const mv = this.game.move(san, { strict: false })
       if (!mv) return false
-      this.historySans.push(mv.san)
-      this.playMoveOnBoard(mv)
+      this.historySans.push(san)
+      await this.playMoveOnBoardAsync(mv)
       return true
     }
     catch {
       return false
     }
+  }
+
+  // Book moves at the current position whose child node still needs practice.
+  private legalPlayerSansNeedingPractice(): string[] {
+    const root = this.tree
+    if (!root) return []
+    if (this.game.turn() !== this.playerSide) return []
+    const node = walkToNode(root, this.historySans)
+    if (!node) return []
+    return legalChildSans(this.game, node).filter(
+      (san) => node.children.get(san)?.needsPractice === true,
+    )
   }
 
   private onSnapEnd(_source: string, _target: string): void {
@@ -284,7 +318,7 @@ export class OpeningTrainer {
     return false
   }
 
-  private applyLessonStartPosition(): void {
+  private async applyLessonStartPosition(): Promise<void> {
     const root = this.tree
     if (!root) return
     const g = new Chess()
@@ -296,7 +330,7 @@ export class OpeningTrainer {
       const firstChoices = legalChildSans(g, rootNode).sort()
       const first = firstChoices[0]
       if (!first) return
-      if (!this.applyBookSanAnimated(first)) return
+      await this.applyBookSanAnimated(first)
     }
     else {
       this.resetBoardFromGame()
@@ -305,11 +339,12 @@ export class OpeningTrainer {
 
   private async settleAfterChange(): Promise<void> {
     const root = this.tree
-    if (!root) return
+    if (!root || this.settling) return
+    this.settling = true
 
-    const g = this.game
-
+    try {
     while (true) {
+      const g = this.game
       const newlyCompletedLine = this.tryMarkLeafCompleted()
       const hist = this.historySans
 
@@ -319,8 +354,9 @@ export class OpeningTrainer {
           newlyCompletedLine
           && this.completedPathKeys.size < this.terminalLineCount
         ) {
-          this.applyLessonStartPosition()
+          await this.applyLessonStartPosition()
           this.createBoard()
+          this.settling = false
           await this.settleAfterChange()
           return
         }
@@ -330,21 +366,28 @@ export class OpeningTrainer {
       const outs = legalChildSans(g, node)
       if (outs.length === 0) break
 
-      if (g.turn() === this.playerSide) break
+      if (g.turn() === this.playerSide) {
+        const toLearn = outs.filter(
+          (san) => node.children.get(san)?.needsPractice === true,
+        )
+        if (toLearn.length > 0) break
+        const san = [...outs].sort()[0]!
+        if (!(await this.applyBookSanAnimated(san))) break
+        continue
+      }
 
       if (outs.length > 1) {
         const branchSig = fenSig(g.fen())
-        const g2 = this.game
         const restoredNode = walkToNode(root, this.historySans)
         if (!restoredNode) {
           this.rebuildStatus()
-          return
+          break
         }
 
-        const nextOuts = legalChildSans(g2, restoredNode)
+        const nextOuts = legalChildSans(this.game, restoredNode)
         if (!nextOuts.length) {
           this.rebuildStatus()
-          return
+          break
         }
 
         let used = this.branchDrills.get(branchSig)
@@ -362,18 +405,19 @@ export class OpeningTrainer {
         const nextSan = pickList[Math.floor(Math.random() * pickList.length)]!
         used.add(nextSan)
 
-        if (!this.applyBookSanAnimated(nextSan)) break
+        if (!(await this.applyBookSanAnimated(nextSan))) break
         this.rebuildStatus()
-
-        await this.settleAfterChange()
-        return
+        continue
       }
 
       const san = outs[0]!
-      if (!this.applyBookSanAnimated(san)) break
+      if (!(await this.applyBookSanAnimated(san))) break
     }
 
     this.tryMarkLeafCompleted()
+    } finally {
+      this.settling = false
+    }
   }
 
   private async bootstrap(): Promise<void> {
@@ -401,7 +445,7 @@ export class OpeningTrainer {
       }
     }
 
-    this.applyLessonStartPosition()
+    await this.applyLessonStartPosition()
     await this.settleAfterChange()
   }
 
@@ -500,7 +544,7 @@ export class OpeningTrainer {
     if (g.turn() !== this.playerSide) return false
     const n = walkToNode(this.tree, this.historySans)
     if (!n || n.children.size === 0) return false
-    return legalChildSans(g, n).length > 0
+    return this.legalPlayerSansNeedingPractice().length > 0
   }
 
   private onDrop(source: string, target: string): 'snapback' | void {
@@ -521,16 +565,16 @@ export class OpeningTrainer {
     const node = walkToNode(root, this.historySans)
     if (!node) return 'snapback'
 
-    const outs = legalChildSans(this.game, node)
-    if (outs.length === 0) return 'snapback'
+    const toLearn = this.legalPlayerSansNeedingPractice()
+    if (toLearn.length === 0) return 'snapback'
 
-    const match = findMatchingAmongOutcomes(this.game, from, to, outs)
+    const match = findMatchingAmongOutcomes(this.game, from, to, toLearn)
     if (!match) {
       const attempt = describeDragAttempt(this.game, from, to)
       window.alert(
         attempt
-          ? `That move is not in the repertoire here.\nPlayed: ${attempt}\nAllowed: ${outs.join(', ')}`
-          : `Illegal move.\nAllowed from the file: ${outs.join(', ')}`,
+            ? `That move is not in the repertoire here.\nPlayed: ${attempt}\nAllowed: ${toLearn.join(', ')}`
+            : `Illegal move.\nAllowed from the file: ${toLearn.join(', ')}`,
       )
       return 'snapback'
     }
@@ -538,8 +582,11 @@ export class OpeningTrainer {
     const mv = applyUserMove(this.game, from, to, match)
     if (!mv) return 'snapback'
 
-    const repSan = repertoireSanForPlayed(outs, mv.san)
+    const repSan = repertoireSanForPlayed(toLearn, mv.san)
     this.historySans.push(repSan ?? mv.san)
+
+    const playedNode = walkToNode(root, this.historySans)
+    if (playedNode) playedNode.needsPractice = false
 
     // chessboard.js applies our drop visually in onSnapEnd; do not call position() here.
     this.settleAfterSnap = true

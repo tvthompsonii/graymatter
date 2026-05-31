@@ -14,7 +14,7 @@ export type Node = {
 // Builds a stable string key for a move list so we can compare paths and store training rows.
 // Arguments: sans — ordered SANs from the start position to the node (empty array at root).
 export function canonicalPathKey(sans: readonly string[]): string {
-  return JSON.stringify([...sans])
+  return [...sans].join(',')
 }
 
 // Collapses FEN to piece placement (and related fields) so we can bucket drills by position without clock noise.
