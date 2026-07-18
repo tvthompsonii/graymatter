@@ -24,9 +24,14 @@ export type TrainerChessboardProps = {
     terminalLineCount: number
     terminalPathKeys: ReadonlySet<string>
     playerSide: Side
+    /** Exact SAN path for the current drill line; null when nothing left to practice. */
+    targetPath: readonly string[] | null
     sessionResetKey: number
+    lessonKey: number
     trainingRevision: number
     onStatusChange: (status: string) => void
+    onLessonComplete: () => void
+    onTrainingChanged: () => void
 }
 
 const MOVE_ANIMATION_MS = 350
@@ -146,9 +151,13 @@ export function TrainerChessboard({
     terminalLineCount,
     terminalPathKeys,
     playerSide,
+    targetPath,
     sessionResetKey,
+    lessonKey,
     trainingRevision,
     onStatusChange,
+    onLessonComplete,
+    onTrainingChanged,
 }: TrainerChessboardProps) {
     const gameRef = useRef(new Chess())
     const historySansRef = useRef<string[]>([])
@@ -156,6 +165,7 @@ export function TrainerChessboard({
     const branchDrillsRef = useRef(new Map<string, Set<string>>())
     const settlingRef = useRef(false)
     const runIdRef = useRef(0)
+    const leafHandledRef = useRef(false)
     const previousRootRef = useRef<Node | null>(null)
     const previousSessionResetKeyRef = useRef(sessionResetKey)
 
@@ -167,20 +177,31 @@ export function TrainerChessboard({
 
     const rebuildStatus = useCallback(() => {
         const done = completedPathKeysRef.current.size
+        const sideLabel = playerSide === 'w' ? 'White' : 'Black'
         if (!root) {
-            onStatusChange('Load a PGN to start.')
+            onStatusChange('Loading repertoires…')
         }
-        else if (terminalLineCount > 0 && done >= terminalLineCount) {
-            onStatusChange(
-                `All ${terminalLineCount} terminal lines have been reached at least once. Load another file or Reset session.`,
-            )
+        else if (!targetPath) {
+            onStatusChange('All lines practiced. Reset training progress to start over.')
         }
         else {
             onStatusChange(
-                `Progress: ${done}/${terminalLineCount} terminal lines reached. Drag when it is your move.`,
+                `Training ${sideLabel}. Session lines: ${done}/${terminalLineCount}. Drag when it is your move.`,
             )
         }
-    }, [onStatusChange, root, terminalLineCount])
+    }, [onStatusChange, playerSide, root, targetPath, terminalLineCount])
+
+    const onLessonCompleteRef = useRef(onLessonComplete)
+    onLessonCompleteRef.current = onLessonComplete
+    const onTrainingChangedRef = useRef(onTrainingChanged)
+    onTrainingChangedRef.current = onTrainingChanged
+
+    const finishLineAndAdvance = useCallback(() => {
+        if (leafHandledRef.current) return
+        leafHandledRef.current = true
+        settlingRef.current = false
+        onLessonCompleteRef.current()
+    }, [])
 
     const tryMarkLeafCompleted = useCallback((): boolean => {
         if (!root) return false
@@ -196,6 +217,7 @@ export function TrainerChessboard({
         ) {
             completedPathKeysRef.current.add(pathKey)
             node.needsPractice = false
+            onTrainingChangedRef.current()
             rebuildStatus()
             return !alreadyCompleted
         }
@@ -225,6 +247,7 @@ export function TrainerChessboard({
     const startLesson = useCallback(async (animateFirstMove: boolean) => {
         const runId = ++runIdRef.current
         settlingRef.current = false
+        leafHandledRef.current = false
         gameRef.current = new Chess()
         historySansRef.current = []
         setSelectedSquare(null)
@@ -232,7 +255,8 @@ export function TrainerChessboard({
         setOptionSquares({})
 
         if (root && playerSide === 'b') {
-            const first = legalChildSans(gameRef.current, root).sort()[0]
+            const first = targetPath?.[0]
+                ?? legalChildSans(gameRef.current, root).sort()[0]
             if (first) {
                 gameRef.current.move(first, { strict: false })
                 historySansRef.current.push(first)
@@ -247,7 +271,7 @@ export function TrainerChessboard({
             await wait(MOVE_ANIMATION_MS)
 
         return runId
-    }, [playerSide, rebuildStatus, root])
+    }, [playerSide, rebuildStatus, root, targetPath])
 
     const settleAfterChange = useCallback(async () => {
         if (!root || settlingRef.current) return
@@ -256,39 +280,49 @@ export function TrainerChessboard({
 
         try {
             while (runId === runIdRef.current) {
-                const game = gameRef.current
-                const newlyCompleted = tryMarkLeafCompleted()
+                tryMarkLeafCompleted()
                 const node = walkToNode(root, historySansRef.current)
 
                 if (!node || node.children.size === 0) {
-                    if (
-                        newlyCompleted
-                        && completedPathKeysRef.current.size < terminalLineCount
-                    ) {
-                        settlingRef.current = false
-                        await startLesson(false)
-                        await settleAfterChange()
-                        return
-                    }
-                    break
+                    // End of line — always advance, whether trainee or book played the last move.
+                    finishLineAndAdvance()
+                    return
                 }
 
-                const outs = legalChildSans(game, node)
-                if (!outs.length) break
+                const outs = legalChildSans(gameRef.current, node)
+                if (!outs.length) {
+                    finishLineAndAdvance()
+                    return
+                }
+
+                const nextOnPath = targetPath?.[historySansRef.current.length]
+                const game = gameRef.current
 
                 if (game.turn() === playerSide) {
+                    if (nextOnPath && outs.includes(nextOnPath)) {
+                        const child = node.children.get(nextOnPath)
+                        if (child?.needsPractice) break
+                        if (!(await applyBookMove(nextOnPath, runId))) break
+                        continue
+                    }
+
                     const needsPractice = outs.filter(
                         (san) => node.children.get(san)?.needsPractice === true,
                     )
                     if (needsPractice.length) break
 
-                    const practicedMove = [...outs].sort()[0]!
+                    const practicedMove = nextOnPath && outs.includes(nextOnPath)
+                        ? nextOnPath
+                        : [...outs].sort()[0]!
                     if (!(await applyBookMove(practicedMove, runId))) break
                     continue
                 }
 
                 let opponentMove: string
-                if (outs.length === 1) {
+                if (nextOnPath && outs.includes(nextOnPath)) {
+                    opponentMove = nextOnPath
+                }
+                else if (outs.length === 1) {
                     opponentMove = outs[0]!
                 }
                 else {
@@ -312,16 +346,20 @@ export function TrainerChessboard({
             }
 
             tryMarkLeafCompleted()
+            const endNode = walkToNode(root, historySansRef.current)
+            if (!endNode || endNode.children.size === 0) {
+                finishLineAndAdvance()
+            }
         }
         finally {
             settlingRef.current = false
         }
     }, [
         applyBookMove,
+        finishLineAndAdvance,
         playerSide,
         root,
-        startLesson,
-        terminalLineCount,
+        targetPath,
         tryMarkLeafCompleted,
     ])
 
@@ -340,7 +378,7 @@ export function TrainerChessboard({
             await startLesson(false)
             await settleAfterChange()
         })()
-    }, [playerSide, root, sessionResetKey, startLesson, settleAfterChange])
+    }, [playerSide, root, sessionResetKey, lessonKey, startLesson, settleAfterChange])
 
     useEffect(() => {
         if (!root) return
@@ -351,10 +389,18 @@ export function TrainerChessboard({
         if (!root || gameRef.current.turn() !== playerSide) return []
         const node = walkToNode(root, historySansRef.current)
         if (!node) return []
+
+        const nextOnPath = targetPath?.[historySansRef.current.length]
+        if (nextOnPath) {
+            const child = node.children.get(nextOnPath)
+            if (child?.needsPractice) return [nextOnPath]
+            return []
+        }
+
         return legalChildSans(gameRef.current, node).filter(
             (san) => node.children.get(san)?.needsPractice === true,
         )
-    }, [playerSide, root])
+    }, [playerSide, root, targetPath])
 
     const canDragPiece = useCallback(({ piece }: PieceHandlerArgs): boolean => {
         if (piece.pieceType[0] !== playerSide) return false
@@ -398,10 +444,14 @@ export function TrainerChessboard({
         const repertoireSan = repertoireSanForPlayed(allowed, move.san) ?? move.san
         historySansRef.current.push(repertoireSan)
         const playedNode = walkToNode(root, historySansRef.current)
-        if (playedNode) playedNode.needsPractice = false
+        if (playedNode) {
+            playedNode.needsPractice = false
+            onTrainingChangedRef.current()
+        }
 
         setSelectedSquare(null)
         setFen(game.fen())
+        setLastMoveSquares({ from: move.from, to: move.to })
         const runId = runIdRef.current
         void (async () => {
             await wait(MOVE_ANIMATION_MS)

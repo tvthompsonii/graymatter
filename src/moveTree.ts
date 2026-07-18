@@ -113,6 +113,57 @@ export function resetNeedsPractice(root: Node): void {
     })
 }
 
+/** True when this ply index is a move the trainee plays (0 = White's first move). */
+export function isPlayerPly(playerSide: 'w' | 'b', plyIndex: number): boolean {
+    return playerSide === 'w' ? plyIndex % 2 === 0 : plyIndex % 2 === 1
+}
+
+/**
+ * Terminal paths where at least one of the trainee's moves still needs practice.
+ * Opponent-move nodes are ignored so White replies in a Black book do not keep the line "open".
+ */
+export function collectPracticeTerminalPaths(
+    root: Node,
+    playerSide: 'w' | 'b',
+): string[][] {
+    const paths: string[][] = []
+
+    function dfs(n: Node, pathSans: string[], anyPlayerNeeds: boolean): void {
+        if (n.children.size === 0) {
+            if (pathSans.length > 0 && anyPlayerNeeds) paths.push([...pathSans])
+            return
+        }
+        for (const san of [...n.children.keys()].sort()) {
+            const child = n.children.get(san)
+            if (!child) continue
+            const plyIndex = pathSans.length
+            const playerNeeds =
+                anyPlayerNeeds
+                || (isPlayerPly(playerSide, plyIndex) && child.needsPractice)
+            dfs(child, [...pathSans, san], playerNeeds)
+        }
+    }
+
+    dfs(root, [], false)
+    return paths
+}
+
+export function pickRandomPracticePath(
+    root: Node,
+    playerSide: 'w' | 'b',
+): string[] | null {
+    const paths = collectPracticeTerminalPaths(root, playerSide)
+    if (!paths.length) return null
+    return paths[Math.floor(Math.random() * paths.length)]!
+}
+
+export function treeHasPracticeRemaining(
+    root: Node,
+    playerSide: 'w' | 'b',
+): boolean {
+    return collectPracticeTerminalPaths(root, playerSide).length > 0
+}
+
 // Prints the whole repertoire to the browser console after PGN import to verify structure and path keys.
 // Arguments: root — trie root to dump.
 export function logRepertoireTreeDfs(root: Node): void {
