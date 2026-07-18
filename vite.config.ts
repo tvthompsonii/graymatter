@@ -3,5 +3,12 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+    // Required so packaged Electron can load assets via file://
+    base: './',
+    plugins: [react(), tailwindcss()],
+    server: {
+        host: '127.0.0.1',
+        port: 5173,
+        strictPort: true,
+    },
 })
