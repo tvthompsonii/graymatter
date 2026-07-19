@@ -35,7 +35,7 @@ function createWindow() {
         show: false,
         autoHideMenuBar: true,
         backgroundColor: '#020617',
-        title: 'Chess Opening Trainer',
+        title: 'GrayMatter',
         webPreferences: {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,

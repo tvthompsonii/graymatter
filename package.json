@@ -35,7 +35,7 @@
     },
     "build": {
         "appId": "com.graymatter.trainer",
-        "productName": "Chess Opening Trainer",
+        "productName": "GrayMatter",
         "directories": {
             "output": "release"
         },
