@@ -13,6 +13,7 @@ const PATHS = {
     whitePgn: path.join(GRAYMATTER_DIR, 'WhiteDenormalized.pgn'),
     blackPgn: path.join(GRAYMATTER_DIR, 'BlackDenormalized.pgn'),
     trainingStatus: path.join(GRAYMATTER_DIR, 'TrainingStatus.json'),
+    settings: path.join(GRAYMATTER_DIR, 'settings.json'),
 }
 
 ipcMain.handle('graymatter:getPaths', () => PATHS)

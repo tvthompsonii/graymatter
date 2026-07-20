@@ -13,6 +13,7 @@ import { boardChrome, customPieces, MOVE_ANIMATION_MS } from './boardTheme'
 import type { GraymatterPaths } from './graymatter'
 import {
     canonicalPathKey,
+    countPlayerMoves,
     fenSig,
     legalChildSans,
     logRepertoireTreeDfs,
@@ -39,6 +40,7 @@ export type TrainerChessboardProps = {
     playerSide: Side
     /** Exact SAN path for the current drill line; null when nothing left to practice. */
     targetPath: readonly string[] | null
+    trainingDepth: number
     sessionResetKey: number
     lessonKey: number
     trainingRevision: number
@@ -147,6 +149,7 @@ export function TrainerChessboard({
     terminalPathKeys,
     playerSide,
     targetPath,
+    trainingDepth,
     sessionResetKey,
     lessonKey,
     trainingRevision,
@@ -276,7 +279,14 @@ export function TrainerChessboard({
         try {
             while (runId === runIdRef.current) {
                 tryMarkLeafCompleted()
-                const node = walkToNode(root, historySansRef.current)
+                const history = historySansRef.current
+
+                if (countPlayerMoves(history, playerSide) >= trainingDepth) {
+                    finishLineAndAdvance()
+                    return
+                }
+
+                const node = walkToNode(root, history)
 
                 if (!node || node.children.size === 0) {
                     // End of line — always advance, whether trainee or book played the last move.
@@ -341,7 +351,12 @@ export function TrainerChessboard({
             }
 
             tryMarkLeafCompleted()
-            const endNode = walkToNode(root, historySansRef.current)
+            const endHistory = historySansRef.current
+            if (countPlayerMoves(endHistory, playerSide) >= trainingDepth) {
+                finishLineAndAdvance()
+                return
+            }
+            const endNode = walkToNode(root, endHistory)
             if (!endNode || endNode.children.size === 0) {
                 finishLineAndAdvance()
             }
@@ -355,6 +370,7 @@ export function TrainerChessboard({
         playerSide,
         root,
         targetPath,
+        trainingDepth,
         tryMarkLeafCompleted,
     ])
 
@@ -559,9 +575,10 @@ function pickActiveSide(
     mode: TrainMode,
     white: ParsedRepertoire | null,
     black: ParsedRepertoire | null,
+    trainingDepth: number,
 ): Side | null {
-    const whiteOk = mode !== 'black' && !!white && treeHasPracticeRemaining(white.root, 'w')
-    const blackOk = mode !== 'white' && !!black && treeHasPracticeRemaining(black.root, 'b')
+    const whiteOk = mode !== 'black' && !!white && treeHasPracticeRemaining(white.root, 'w', trainingDepth)
+    const blackOk = mode !== 'white' && !!black && treeHasPracticeRemaining(black.root, 'b', trainingDepth)
 
     if (mode === 'white') return white ? 'w' : null
     if (mode === 'black') return black ? 'b' : null
@@ -582,13 +599,14 @@ function modeHasPracticeRemaining(
     mode: TrainMode,
     white: ParsedRepertoire | null,
     black: ParsedRepertoire | null,
+    trainingDepth: number,
 ): boolean {
-    if (mode !== 'black' && white && treeHasPracticeRemaining(white.root, 'w')) return true
-    if (mode !== 'white' && black && treeHasPracticeRemaining(black.root, 'b')) return true
+    if (mode !== 'black' && white && treeHasPracticeRemaining(white.root, 'w', trainingDepth)) return true
+    if (mode !== 'white' && black && treeHasPracticeRemaining(black.root, 'b', trainingDepth)) return true
     return false
 }
 
-export function OpeningsPage() {
+export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
     const [paths, setPaths] = useState<GraymatterPaths | null>(null)
     const [whiteRepertoire, setWhiteRepertoire] = useState<ParsedRepertoire | null>(null)
     const [blackRepertoire, setBlackRepertoire] = useState<ParsedRepertoire | null>(null)
@@ -644,18 +662,18 @@ export function OpeningsPage() {
         black: ParsedRepertoire | null,
         opts?: { resetSession?: boolean },
     ) => {
-        const side = pickActiveSide(mode, white, black)
+        const side = pickActiveSide(mode, white, black, trainingDepth)
         if (!side) return
 
         const rep = side === 'w' ? white : black
-        if (!rep || !modeHasPracticeRemaining(mode, white, black)) {
+        if (!rep || !modeHasPracticeRemaining(mode, white, black, trainingDepth)) {
             setActiveSide(side)
             setTargetPath(null)
             setStatus('All lines practiced. Reset training progress to start over.')
             return
         }
 
-        const path = pickRandomPracticePath(rep.root, side)
+        const path = pickRandomPracticePath(rep.root, side, trainingDepth)
         if (!path) {
             setActiveSide(side)
             setTargetPath(null)
@@ -667,7 +685,7 @@ export function OpeningsPage() {
         setTargetPath(path)
         if (opts?.resetSession) setSessionResetKey((key) => key + 1)
         setLessonKey((key) => key + 1)
-    }, [])
+    }, [trainingDepth])
 
     const onLessonComplete = useCallback(() => {
         beginLesson(trainMode, whiteRef.current, blackRef.current)
@@ -843,6 +861,7 @@ export function OpeningsPage() {
                     terminalPathKeys={activeRepertoire?.terminalPathKeys ?? EMPTY_PATH_KEYS}
                     playerSide={activeSide}
                     targetPath={targetPath}
+                    trainingDepth={trainingDepth}
                     sessionResetKey={sessionResetKey}
                     lessonKey={lessonKey}
                     trainingRevision={trainingRevision}

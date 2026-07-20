@@ -118,41 +118,86 @@ export function isPlayerPly(playerSide: 'w' | 'b', plyIndex: number): boolean {
     return playerSide === 'w' ? plyIndex % 2 === 0 : plyIndex % 2 === 1
 }
 
+/** How many of the trainee's moves appear in a SAN history. */
+export function countPlayerMoves(
+    historySans: readonly string[],
+    playerSide: 'w' | 'b',
+): number {
+    let count = 0
+    for (let i = 0; i < historySans.length; i++) {
+        if (isPlayerPly(playerSide, i)) count++
+    }
+    return count
+}
+
+/** Keep plies through the trainee's Nth move (inclusive). */
+export function truncatePathToTrainingDepth(
+    path: readonly string[],
+    playerSide: 'w' | 'b',
+    trainingDepth: number,
+): string[] {
+    const depth = Math.max(1, trainingDepth)
+    let playerMoves = 0
+    const out: string[] = []
+    for (let i = 0; i < path.length; i++) {
+        out.push(path[i]!)
+        if (isPlayerPly(playerSide, i)) {
+            playerMoves++
+            if (playerMoves >= depth) break
+        }
+    }
+    return out
+}
+
 /**
- * Terminal paths where at least one of the trainee's moves still needs practice.
- * Opponent-move nodes are ignored so White replies in a Black book do not keep the line "open".
+ * Practice drill paths truncated to trainingDepth player moves.
+ * A line is included when any of those player moves still needs practice.
  */
 export function collectPracticeTerminalPaths(
     root: Node,
     playerSide: 'w' | 'b',
+    trainingDepth: number,
 ): string[][] {
-    const paths: string[][] = []
+    const depth = Math.max(1, trainingDepth)
+    const byKey = new Map<string, string[]>()
 
-    function dfs(n: Node, pathSans: string[], anyPlayerNeeds: boolean): void {
-        if (n.children.size === 0) {
-            if (pathSans.length > 0 && anyPlayerNeeds) paths.push([...pathSans])
+    function dfs(
+        n: Node,
+        pathSans: string[],
+        anyPlayerNeeds: boolean,
+        playerMoveCount: number,
+    ): void {
+        const reachedDepth = playerMoveCount >= depth
+        if (n.children.size === 0 || reachedDepth) {
+            if (pathSans.length > 0 && anyPlayerNeeds) {
+                const truncated = truncatePathToTrainingDepth(pathSans, playerSide, depth)
+                byKey.set(canonicalPathKey(truncated), truncated)
+            }
             return
         }
+
         for (const san of [...n.children.keys()].sort()) {
             const child = n.children.get(san)
             if (!child) continue
             const plyIndex = pathSans.length
+            const isPlayer = isPlayerPly(playerSide, plyIndex)
+            const nextPlayerCount = playerMoveCount + (isPlayer ? 1 : 0)
             const playerNeeds =
-                anyPlayerNeeds
-                || (isPlayerPly(playerSide, plyIndex) && child.needsPractice)
-            dfs(child, [...pathSans, san], playerNeeds)
+                anyPlayerNeeds || (isPlayer && child.needsPractice)
+            dfs(child, [...pathSans, san], playerNeeds, nextPlayerCount)
         }
     }
 
-    dfs(root, [], false)
-    return paths
+    dfs(root, [], false, 0)
+    return [...byKey.values()]
 }
 
 export function pickRandomPracticePath(
     root: Node,
     playerSide: 'w' | 'b',
+    trainingDepth: number,
 ): string[] | null {
-    const paths = collectPracticeTerminalPaths(root, playerSide)
+    const paths = collectPracticeTerminalPaths(root, playerSide, trainingDepth)
     if (!paths.length) return null
     return paths[Math.floor(Math.random() * paths.length)]!
 }
@@ -160,8 +205,9 @@ export function pickRandomPracticePath(
 export function treeHasPracticeRemaining(
     root: Node,
     playerSide: 'w' | 'b',
+    trainingDepth: number,
 ): boolean {
-    return collectPracticeTerminalPaths(root, playerSide).length > 0
+    return collectPracticeTerminalPaths(root, playerSide, trainingDepth).length > 0
 }
 
 // Prints the whole repertoire to the browser console after PGN import to verify structure and path keys.

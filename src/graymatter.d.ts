@@ -2,6 +2,7 @@ export type GraymatterPaths = {
     whitePgn: string
     blackPgn: string
     trainingStatus: string
+    settings: string
 }
 
 export type GraymatterApi = {
