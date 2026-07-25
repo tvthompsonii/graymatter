@@ -6,4 +6,6 @@ contextBridge.exposeInMainWorld('graymatter', {
     readTextFile: (filePath) => ipcRenderer.invoke('graymatter:readTextFile', filePath),
     writeTextFile: (filePath, contents) =>
         ipcRenderer.invoke('graymatter:writeTextFile', filePath, contents),
+    pickRandomPuzzle: (filters) => ipcRenderer.invoke('graymatter:fetchNextPuzzle', filters),
+    fetchNextPuzzle: (filters) => ipcRenderer.invoke('graymatter:fetchNextPuzzle', filters),
 })
