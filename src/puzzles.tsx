@@ -81,12 +81,15 @@ export function PuzzlesPage() {
     const [loading, setLoading] = useState(false)
     const [status, setStatus] = useState('Press Next puzzle to start.')
     const [ready, setReady] = useState(false)
+    const [hintTrigger, setHintTrigger] = useState(0)
+    const [playSolutionTrigger, setPlaySolutionTrigger] = useState(0)
+    const [solutionPlaying, setSolutionPlaying] = useState(false)
 
     const fetchGenerationRef = useRef(0)
     const filtersRef = useRef({ ratingLo, ratingHi, selectedThemes })
     filtersRef.current = { ratingLo, ratingHi, selectedThemes }
 
-    const fetchNextPuzzle = useCallback(async () => {
+    const fetchNextPuzzle = useCallback(async (options?: { afterSolve?: boolean }) => {
         const api = window.graymatter?.fetchNextPuzzle ?? window.graymatter?.pickRandomPuzzle
         if (!api) {
             setLoadError('GrayMatter puzzle API is unavailable. Run this app in Electron.')
@@ -95,10 +98,13 @@ export function PuzzlesPage() {
 
         const generation = ++fetchGenerationRef.current
         const { ratingLo: lo, ratingHi: hi, selectedThemes: themes } = filtersRef.current
+        const afterSolve = options?.afterSolve ?? false
 
         setLoading(true)
         setLoadError(null)
-        setStatus('Loading next puzzle…')
+        if (!afterSolve) {
+            setStatus('Loading next puzzle…')
+        }
 
         try {
             const result = await api({
@@ -121,7 +127,9 @@ export function PuzzlesPage() {
 
             setActivePuzzle(result.puzzle)
             setPuzzleKey((key) => key + 1)
-            setStatus(`Puzzle ${result.puzzle.id} · rating ${result.puzzle.rating}`)
+            if (!afterSolve) {
+                setStatus(`Puzzle ${result.puzzle.id} · rating ${result.puzzle.rating}`)
+            }
         }
         catch (err) {
             if (generation !== fetchGenerationRef.current) return
@@ -153,6 +161,20 @@ export function PuzzlesPage() {
     const onRatingChange = (lo: number, hi: number) => {
         setRatingLo(lo)
         setRatingHi(hi)
+    }
+
+    const handleNextPuzzle = () => {
+        if (!activePuzzle) {
+            void fetchNextPuzzle()
+            return
+        }
+        setSolutionPlaying(true)
+        setPlaySolutionTrigger((trigger) => trigger + 1)
+    }
+
+    const handlePlaySolutionComplete = (success: boolean) => {
+        setSolutionPlaying(false)
+        if (success) void fetchNextPuzzle()
     }
 
     return (
@@ -208,8 +230,16 @@ export function PuzzlesPage() {
                 <div className="flex flex-wrap gap-2">
                     <button
                         type="button"
-                        onClick={() => void fetchNextPuzzle()}
-                        disabled={loading || !ready}
+                        onClick={() => setHintTrigger((trigger) => trigger + 1)}
+                        disabled={loading || !ready || !activePuzzle || solutionPlaying}
+                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-amber-500/60 enabled:hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                        Hint
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleNextPuzzle}
+                        disabled={loading || !ready || solutionPlaying}
                         className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-amber-500/60 enabled:hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                         Next puzzle
@@ -233,7 +263,10 @@ export function PuzzlesPage() {
                         <PuzzleChessboard
                             key={puzzleKey}
                             puzzle={activePuzzle}
-                            onSolved={() => void fetchNextPuzzle()}
+                            hintTrigger={hintTrigger}
+                            playSolutionTrigger={playSolutionTrigger}
+                            onPlaySolutionComplete={handlePlaySolutionComplete}
+                            onSolved={() => void fetchNextPuzzle({ afterSolve: true })}
                             onStatusChange={setStatus}
                         />
                     ) : (

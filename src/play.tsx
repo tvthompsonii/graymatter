@@ -31,7 +31,7 @@ function findKingSquare(game: Chess, color: 'w' | 'b'): string | null {
 /** Soft red disc behind a checkmated king (Lichess-style). */
 const CHECKMATE_KING_STYLE: CSSProperties = {
     background:
-        'radial-gradient(ellipse at center, rgba(235, 60, 60, 0.72) 0%, rgba(235, 60, 60, 0.42) 38%, transparent 70%)',
+        'radial-gradient(ellipse at center, rgba(235, 60, 60, 0.90) 0%, rgba(235, 60, 60, 0.75) 45%, transparent 70%)',
 }
 
 

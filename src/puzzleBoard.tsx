@@ -15,6 +15,9 @@ function wait(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
+const SOLUTION_MOVE_PAUSE_MS = 250
+const SOLUTION_DONE_PAUSE_MS = 2000
+
 type UciMove = {
     from: Square
     to: Square
@@ -68,16 +71,28 @@ export function playerColorForPuzzle(puzzle: Puzzle): 'w' | 'b' {
     return game.turn()
 }
 
+/** Soft green disc behind the piece to move for a hint (matches Play checkmate glow). */
+const HINT_PIECE_STYLE: CSSProperties = {
+    background:
+        'radial-gradient(ellipse at center, rgba(72, 187, 98, 0.90) 0%, rgba(72, 187, 98, 0.75) 45%, transparent 80%)',
+}
+
 type PuzzleChessboardProps = {
     puzzle: Puzzle
     onSolved: () => void
     onStatusChange?: (status: string) => void
+    hintTrigger?: number
+    playSolutionTrigger?: number
+    onPlaySolutionComplete?: (success: boolean) => void
 }
 
 export function PuzzleChessboard({
     puzzle,
     onSolved,
     onStatusChange,
+    hintTrigger = 0,
+    playSolutionTrigger = 0,
+    onPlaySolutionComplete,
 }: PuzzleChessboardProps) {
     const playerColor = playerColorForPuzzle(puzzle)
     const gameRef = useRef(new Chess())
@@ -86,16 +101,23 @@ export function PuzzleChessboard({
     const busyRef = useRef(false)
     const onSolvedRef = useRef(onSolved)
     onSolvedRef.current = onSolved
+    const onPlaySolutionCompleteRef = useRef(onPlaySolutionComplete)
+    onPlaySolutionCompleteRef.current = onPlaySolutionComplete
 
     const [fen, setFen] = useState(() => new Chess().fen())
     const [boardKey, setBoardKey] = useState(0)
     const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
     const [optionSquares, setOptionSquares] = useState<Record<string, CSSProperties>>({})
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({})
+    const [hintSquare, setHintSquare] = useState<string | null>(null)
 
     const clearSelection = useCallback(() => {
         setSelectedSquare(null)
         setOptionSquares({})
+    }, [])
+
+    const clearHint = useCallback(() => {
+        setHintSquare(null)
     }, [])
 
     const syncBoard = useCallback((game: Chess, last?: { from: string; to: string }) => {
@@ -103,9 +125,10 @@ export function PuzzleChessboard({
         if (last) setLastMoveSquares(last)
     }, [])
 
-    const playComputerUci = useCallback(async (
+    const playUci = useCallback(async (
         uci: string,
         runId: number,
+        extraPauseMs = 0,
     ): Promise<boolean> => {
         const parsed = parseUci(uci)
         if (!parsed) return false
@@ -120,6 +143,8 @@ export function PuzzleChessboard({
             moveIndexRef.current++
             syncBoard(gameRef.current, { from: move.from, to: move.to })
             await wait(MOVE_ANIMATION_MS)
+            if (runId !== runIdRef.current) return false
+            if (extraPauseMs > 0) await wait(extraPauseMs)
             return runId === runIdRef.current
         }
         catch {
@@ -127,11 +152,44 @@ export function PuzzleChessboard({
         }
     }, [syncBoard])
 
+    const playComputerUci = useCallback(async (
+        uci: string,
+        runId: number,
+    ): Promise<boolean> => playUci(uci, runId), [playUci])
+
     const finishPuzzle = useCallback(async (runId: number) => {
-        onStatusChange?.('Correct! Next puzzle…')
+        onStatusChange?.('Correct! Loading next puzzle...')
         await wait(1000)
         if (runId === runIdRef.current) onSolvedRef.current()
     }, [onStatusChange])
+
+    const playSolution = useCallback(async (runId: number) => {
+        busyRef.current = true
+        clearSelection()
+        clearHint()
+        onStatusChange?.('Playing solution...')
+
+        let success = false
+        try {
+            const { moves } = puzzle
+            while (moveIndexRef.current < moves.length) {
+                const uci = moves[moveIndexRef.current]!
+                if (!(await playUci(uci, runId, SOLUTION_MOVE_PAUSE_MS))) return
+            }
+
+            onStatusChange?.('Playing solution... Done.')
+            await wait(SOLUTION_DONE_PAUSE_MS)
+            if (runId !== runIdRef.current) return
+
+            success = true
+        }
+        finally {
+            if (runId === runIdRef.current) {
+                busyRef.current = false
+                onPlaySolutionCompleteRef.current?.(success)
+            }
+        }
+    }, [clearHint, clearSelection, onStatusChange, playUci, puzzle])
 
     const continueAfterPlayerMove = useCallback(async (runId: number) => {
         const { moves } = puzzle
@@ -152,14 +210,13 @@ export function PuzzleChessboard({
         const runId = ++runIdRef.current
         busyRef.current = true
         clearSelection()
+        clearHint()
         setLastMoveSquares({})
 
         gameRef.current = new Chess(puzzle.fen)
         moveIndexRef.current = 0
         syncBoard(gameRef.current)
         setBoardKey((key) => key + 1)
-
-        onStatusChange?.('Loading puzzle…')
 
         if (!puzzle.moves.length) {
             busyRef.current = false
@@ -174,7 +231,23 @@ export function PuzzleChessboard({
 
         busyRef.current = false
         await continueAfterPlayerMove(runId)
-    }, [clearSelection, continueAfterPlayerMove, onStatusChange, playComputerUci, puzzle, syncBoard])
+    }, [clearHint, clearSelection, continueAfterPlayerMove, onStatusChange, playComputerUci, puzzle, syncBoard])
+
+    useEffect(() => {
+        if (!hintTrigger) return
+        if (busyRef.current) return
+        if (gameRef.current.turn() !== playerColor) return
+
+        const expectedUci = puzzle.moves[moveIndexRef.current]
+        const parsed = expectedUci ? parseUci(expectedUci) : null
+        if (parsed) setHintSquare(parsed.from)
+    }, [hintTrigger, playerColor, puzzle.moves])
+
+    useEffect(() => {
+        if (!playSolutionTrigger) return
+        const runId = ++runIdRef.current
+        void playSolution(runId)
+    }, [playSolutionTrigger, playSolution])
 
     useEffect(() => {
         void startPuzzle()
@@ -245,6 +318,7 @@ export function PuzzleChessboard({
 
         moveIndexRef.current++
         clearSelection()
+        clearHint()
         syncBoard(game, { from: move.from, to: move.to })
 
         const runId = runIdRef.current
@@ -259,6 +333,7 @@ export function PuzzleChessboard({
         return true
     }, [
         clearSelection,
+        clearHint,
         continueAfterPlayerMove,
         onStatusChange,
         playerColor,
@@ -320,6 +395,9 @@ export function PuzzleChessboard({
         }),
         ...(selectedSquare && {
             [selectedSquare]: { boxShadow: 'inset 0 0 0 4px rgba(245, 158, 11, 0.75)' },
+        }),
+        ...(hintSquare && {
+            [hintSquare]: HINT_PIECE_STYLE,
         }),
     }
 
