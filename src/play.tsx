@@ -15,6 +15,49 @@ function wait(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
+const CAPTURE_PIECE_WEIGHT: Record<string, number> = {
+    p: 1,
+    n: 3,
+    b: 3,
+    r: 5,
+    q: 9,
+}
+
+type VerboseMove = ReturnType<Chess['moves']>[number] & {
+    from: string
+    to: string
+    piece: string
+    captured?: string
+    san: string
+}
+
+function pickRandom<T>(items: T[]): T {
+    return items[Math.floor(Math.random() * items.length)]!
+}
+
+/** Prefer captures (lowest-value capturing piece), then checks, then random. */
+function pickBlackMove(game: Chess, moves: VerboseMove[]): VerboseMove {
+    const captures = moves.filter((move) => move.captured)
+    if (captures.length) {
+        const minWeight = Math.min(
+            ...captures.map((move) => CAPTURE_PIECE_WEIGHT[move.piece] ?? Number.MAX_SAFE_INTEGER),
+        )
+        const candidates = captures.filter(
+            (move) => (CAPTURE_PIECE_WEIGHT[move.piece] ?? Number.MAX_SAFE_INTEGER) === minWeight,
+        )
+        return pickRandom(candidates)
+    }
+
+    const checks = moves.filter((move) => {
+        const copy = new Chess(game.fen())
+        copy.move({ from: move.from, to: move.to, promotion: move.promotion })
+        return copy.inCheck()
+    })
+    if (checks.length) return pickRandom(checks)
+
+    return pickRandom(moves)
+}
+
 function findKingSquare(game: Chess, color: 'w' | 'b'): string | null {
     const board = game.board()
     for (let rank = 0; rank < 8; rank++) {
@@ -39,7 +82,7 @@ type PlayChessboardProps = {
     boardId: string
 }
 
-/** Simple board: White moves freely; Black replies with a random legal move. */
+/** Simple board: White moves freely; Black replies with a simple heuristic. */
 export function PlayChessboard({ boardId }: PlayChessboardProps) {
     const gameRef = useRef(new Chess())
     const [fen, setFen] = useState(() => gameRef.current.fen())
@@ -74,14 +117,14 @@ export function PlayChessboard({ boardId }: PlayChessboardProps) {
         return true
     }, [])
 
-    const playBlackRandom = useCallback(async () => {
+    const playBlackMove = useCallback(async () => {
         const game = gameRef.current
         if (game.isGameOver() || game.turn() !== 'b') return
 
-        const moves = game.moves({ verbose: true })
+        const moves = game.moves({ verbose: true }) as VerboseMove[]
         if (!moves.length) return
 
-        const pick = moves[Math.floor(Math.random() * moves.length)]!
+        const pick = pickBlackMove(game, moves)
         game.move(pick)
         setFen(game.fen())
         setLastMoveSquares({ from: pick.from, to: pick.to })
@@ -124,12 +167,12 @@ export function PlayChessboard({ boardId }: PlayChessboardProps) {
         busyRef.current = true
         void (async () => {
             await wait(MOVE_ANIMATION_MS)
-            await playBlackRandom()
+            await playBlackMove()
             busyRef.current = false
         })()
 
         return true
-    }, [clearSelection, playBlackRandom])
+    }, [clearSelection, playBlackMove])
 
     const canDragPiece = useCallback(({ piece }: PieceHandlerArgs): boolean => {
         if (busyRef.current) return false
@@ -227,7 +270,7 @@ export function PlayPage() {
                 <header>
                     <p className="mt-2 text-sm leading-relaxed text-slate-400">
                         Play against a bot. Engine strength and openings will come later; for now you
-                        move White and Black answers with a random legal move.
+                        move White and Black prefers captures, then checks, otherwise a random move.
                     </p>
                     <p className="mt-2 font-mono text-xs text-slate-500">
                         Version {APP_VERSION}
