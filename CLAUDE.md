@@ -43,11 +43,11 @@ Flow: `openings.tsx` loads both PGNs on mount → parses each into a `ParsedRepe
 
 ### Play mode
 
-`src/play.tsx` (`PlayChessboard`) and `src/freePlayBoard.tsx` (`FreePlayChessboard`) are both simple non-persisted vs-bot boards — no repertoire, no puzzle file, nothing saved to disk. `PlayChessboard`'s bot prefers captures (by lowest-value capturing piece), then checks, then a random legal move; `FreePlayChessboard`'s bot is pure random. `freePlayBoard.tsx` currently looks unused by `App.tsx` — check before assuming it's wired in.
+`src/play.tsx` (`PlayChessboard`) is a simple non-persisted vs-bot board — no repertoire, no puzzle file, nothing saved to disk. Its bot prefers captures (by lowest-value capturing piece), then checks, then a random legal move.
 
 ### Shared board plumbing
 
-All three board components (`TrainerChessboard`, `PuzzleChessboard`, `PlayChessboard`/`FreePlayChessboard`) duplicate the same `react-chessboard` wiring pattern: a `gameRef` holding a `chess.js` instance as the source of truth, `fen` state driving the rendered position, click-to-move and drag-to-move handlers that converge on one `attempt*Move` function, and square-highlight state for move options / last move / selection. `src/boardTheme.tsx` centralizes the shared visual chrome (`boardChrome`, `customPieces` — SVGs served from `public/staunty/`, `MOVE_ANIMATION_MS`). When touching move-input logic, check whether the fix applies to all three boards, since the logic isn't factored into a shared hook.
+All three board components (`TrainerChessboard`, `PuzzleChessboard`, `PlayChessboard`) duplicate the same `react-chessboard` wiring pattern: a `gameRef` holding a `chess.js` instance as the source of truth, `fen` state driving the rendered position, click-to-move and drag-to-move handlers that converge on one `attempt*Move` function, and square-highlight state for move options / last move / selection. `src/boardTheme.tsx` centralizes the shared visual chrome (`boardChrome`, `customPieces` — SVGs served from `public/staunty/`, `MOVE_ANIMATION_MS`). When touching move-input logic, check whether the fix applies to all three boards, since the logic isn't factored into a shared hook.
 
 ### Settings
 
