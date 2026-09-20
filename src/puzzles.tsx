@@ -90,7 +90,7 @@ export function PuzzlesPage() {
     filtersRef.current = { ratingLo, ratingHi, selectedThemes }
 
     const fetchNextPuzzle = useCallback(async (options?: { afterSolve?: boolean }) => {
-        const api = window.graymatter?.fetchNextPuzzle ?? window.graymatter?.pickRandomPuzzle
+        const api = window.graymatter?.fetchNextPuzzle
         if (!api) {
             setLoadError('GrayMatter puzzle API is unavailable. Run this app in Electron.')
             return

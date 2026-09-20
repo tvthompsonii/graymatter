@@ -30,8 +30,6 @@ export type GraymatterApi = {
     getPaths: () => Promise<GraymatterPaths>
     readTextFile: (filePath: string) => Promise<string>
     writeTextFile: (filePath: string, contents: string) => Promise<void>
-    /** @deprecated Use fetchNextPuzzle */
-    pickRandomPuzzle: (filters: PuzzlePickFilters) => Promise<PuzzlePickResult>
     fetchNextPuzzle: (filters: PuzzlePickFilters) => Promise<PuzzlePickResult>
 }
 
