@@ -5,10 +5,9 @@ const { findNextPuzzleFromCsv, readPuzzleStatus, writePuzzleStatus } = require('
 
 const isDev = !app.isPackaged
 
-const GRAYMATTER_DIR = path.join(
-    app.getPath('documents'),
-    'GrayMatter',
-)
+// Data lives in Google Drive (synced locally, "Available offline") so desktop and
+// laptop share the same repertoires, settings, and progress.
+const GRAYMATTER_DIR = 'G:/My Drive/Tom/Chess/GrayMatter'
 
 const PATHS = {
     whitePgn: path.join(GRAYMATTER_DIR, 'WhiteDenormalized.pgn'),
@@ -34,25 +33,25 @@ ipcMain.handle('graymatter:fetchNextPuzzle', async (_event, filters) => {
     const status = await readPuzzleStatus(PATHS.puzzleStatus)
     let puzzle = await findNextPuzzleFromCsv(
         PATHS.puzzlesCsv,
-        status.lastLineNumber,
+        status.nextByteOffset,
         filters,
     )
 
-    if (!puzzle && status.lastLineNumber > -1) {
+    if (!puzzle && status.nextByteOffset > 0) {
         puzzle = await findNextPuzzleFromCsv(
             PATHS.puzzlesCsv,
-            -1,
+            0,
             filters,
-            status.lastLineNumber,
+            status.nextByteOffset,
         )
     }
 
     if (puzzle) {
         await writePuzzleStatus(PATHS.puzzleStatus, {
-            lastLineNumber: puzzle.lineNumber,
+            nextByteOffset: puzzle.nextByteOffset,
             lastPuzzleId: puzzle.id,
         })
-        const { lineNumber: _line, ...payload } = puzzle
+        const { nextByteOffset: _offset, ...payload } = puzzle
         return { puzzle: payload }
     }
 

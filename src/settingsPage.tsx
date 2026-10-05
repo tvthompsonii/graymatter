@@ -47,7 +47,7 @@ export function SettingsPage({ settings, onSave }: SettingsPageProps) {
                 <header>
                     <p className="mt-2 text-sm leading-relaxed text-slate-400">
                         Adjust how GrayMatter trains and plays. Settings are stored in
-                        Documents/GrayMatter/settings.json.
+                        Google Drive (My Drive/Tom/Chess/GrayMatter/settings.json).
                     </p>
                     <p className="mt-2 font-mono text-xs text-slate-500">
                         Version {APP_VERSION}

@@ -12,11 +12,12 @@ import { APP_VERSION } from './appVersion'
 import { boardChrome, customPieces, MOVE_ANIMATION_MS } from './boardTheme'
 import type { GraymatterPaths } from './graymatter'
 import {
-    canonicalPathKey,
+    collectPracticeTerminalPaths,
     countPlayerMoves,
     fenSig,
     legalChildSans,
     logRepertoireTreeDfs,
+    pathHasPracticeAhead,
     pickRandomPracticePath,
     resetNeedsPractice,
     treeHasPracticeRemaining,
@@ -35,8 +36,8 @@ export type TrainMode = 'both' | 'white' | 'black'
 
 export type TrainerChessboardProps = {
     root: Node | null
-    terminalLineCount: number
-    terminalPathKeys: ReadonlySet<string>
+    /** Progress summary shown in the status line, e.g. "Lines left: 54 · Finished this session: 3". */
+    progressText: string
     playerSide: Side
     /** Exact SAN path for the current drill line; null when nothing left to practice. */
     targetPath: readonly string[] | null
@@ -48,8 +49,6 @@ export type TrainerChessboardProps = {
     onLessonComplete: () => void
     onTrainingChanged: () => void
 }
-
-const EMPTY_PATH_KEYS: ReadonlySet<string> = new Set()
 
 function wait(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -145,8 +144,7 @@ function repertoireSanForPlayed(
 
 export function TrainerChessboard({
     root,
-    terminalLineCount,
-    terminalPathKeys,
+    progressText,
     playerSide,
     targetPath,
     trainingDepth,
@@ -159,7 +157,6 @@ export function TrainerChessboard({
 }: TrainerChessboardProps) {
     const gameRef = useRef(new Chess())
     const historySansRef = useRef<string[]>([])
-    const completedPathKeysRef = useRef(new Set<string>())
     const branchDrillsRef = useRef(new Map<string, Set<string>>())
     const settlingRef = useRef(false)
     const runIdRef = useRef(0)
@@ -174,7 +171,6 @@ export function TrainerChessboard({
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({});
 
     const rebuildStatus = useCallback(() => {
-        const done = completedPathKeysRef.current.size
         const sideLabel = playerSide === 'w' ? 'White' : 'Black'
         if (!root) {
             onStatusChange('Loading repertoires…')
@@ -184,10 +180,14 @@ export function TrainerChessboard({
         }
         else {
             onStatusChange(
-                `Training ${sideLabel}. Session lines: ${done}/${terminalLineCount}. Drag when it is your move.`,
+                `Training ${sideLabel}. ${progressText}. Drag when it is your move.`,
             )
         }
-    }, [onStatusChange, playerSide, root, targetPath, terminalLineCount])
+    }, [onStatusChange, playerSide, progressText, root, targetPath])
+
+    useEffect(() => {
+        rebuildStatus()
+    }, [rebuildStatus])
 
     const onLessonCompleteRef = useRef(onLessonComplete)
     onLessonCompleteRef.current = onLessonComplete
@@ -200,29 +200,6 @@ export function TrainerChessboard({
         settlingRef.current = false
         onLessonCompleteRef.current()
     }, [])
-
-    const tryMarkLeafCompleted = useCallback((): boolean => {
-        if (!root) return false
-        const history = historySansRef.current
-        const pathKey = canonicalPathKey(history)
-        const alreadyCompleted = completedPathKeysRef.current.has(pathKey)
-        const node = walkToNode(root, history)
-
-        if (
-            node
-            && node.children.size === 0
-            && (!terminalPathKeys.size || terminalPathKeys.has(pathKey))
-        ) {
-            completedPathKeysRef.current.add(pathKey)
-            node.needsPractice = false
-            onTrainingChangedRef.current()
-            rebuildStatus()
-            return !alreadyCompleted
-        }
-
-        rebuildStatus()
-        return false
-    }, [rebuildStatus, root, terminalPathKeys])
 
     const applyBookMove = useCallback(async (
         san: string,
@@ -263,13 +240,12 @@ export function TrainerChessboard({
 
         setFen(gameRef.current.fen())
         setBoardKey((key) => key + 1)
-        rebuildStatus()
 
         if (animateFirstMove && playerSide === 'b')
             await wait(MOVE_ANIMATION_MS)
 
         return runId
-    }, [playerSide, rebuildStatus, root, targetPath])
+    }, [playerSide, root, targetPath])
 
     const settleAfterChange = useCallback(async () => {
         if (!root || settlingRef.current) return
@@ -278,10 +254,16 @@ export function TrainerChessboard({
 
         try {
             while (runId === runIdRef.current) {
-                tryMarkLeafCompleted()
                 const history = historySansRef.current
 
                 if (countPlayerMoves(history, playerSide) >= trainingDepth) {
+                    finishLineAndAdvance()
+                    return
+                }
+
+                // The trainee's move must be the last one played: once none of their remaining
+                // moves on this line need practice, stop instead of auto-playing further book moves.
+                if (targetPath && !pathHasPracticeAhead(root, targetPath, history.length, playerSide)) {
                     finishLineAndAdvance()
                     return
                 }
@@ -350,7 +332,6 @@ export function TrainerChessboard({
                 if (!(await applyBookMove(opponentMove, runId))) break
             }
 
-            tryMarkLeafCompleted()
             const endHistory = historySansRef.current
             if (countPlayerMoves(endHistory, playerSide) >= trainingDepth) {
                 finishLineAndAdvance()
@@ -371,7 +352,6 @@ export function TrainerChessboard({
         root,
         targetPath,
         trainingDepth,
-        tryMarkLeafCompleted,
     ])
 
     useEffect(() => {
@@ -381,7 +361,6 @@ export function TrainerChessboard({
         previousRootRef.current = root
         previousSessionResetKeyRef.current = sessionResetKey
         if (rootChanged || sessionWasReset) {
-            completedPathKeysRef.current = new Set()
             branchDrillsRef.current = new Map()
         }
 
@@ -619,18 +598,34 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
     const [lessonKey, setLessonKey] = useState(0)
     const [trainingRevision, setTrainingRevision] = useState(0)
     const [ready, setReady] = useState(false)
+    const [linesFinished, setLinesFinished] = useState(0)
+    // needsPractice flags are mutated in place on the trie; bump this to re-render the lines-left count.
+    const [, setProgressTick] = useState(0)
 
     const whiteRef = useRef<ParsedRepertoire | null>(null)
     const blackRef = useRef<ParsedRepertoire | null>(null)
     const pathsRef = useRef<GraymatterPaths | null>(null)
+    const targetPathRef = useRef<string[] | null>(null)
     const saveChainRef = useRef(Promise.resolve())
 
     whiteRef.current = whiteRepertoire
     blackRef.current = blackRepertoire
     pathsRef.current = paths
+    targetPathRef.current = targetPath
 
     const activeRepertoire =
         activeSide === 'w' ? whiteRepertoire : blackRepertoire
+
+    const whiteLinesLeft = trainMode !== 'black' && whiteRepertoire
+        ? collectPracticeTerminalPaths(whiteRepertoire.root, 'w', trainingDepth).length
+        : 0
+    const blackLinesLeft = trainMode !== 'white' && blackRepertoire
+        ? collectPracticeTerminalPaths(blackRepertoire.root, 'b', trainingDepth).length
+        : 0
+    const linesLeftText = trainMode === 'both'
+        ? `Lines left: ${whiteLinesLeft + blackLinesLeft} (White ${whiteLinesLeft}, Black ${blackLinesLeft})`
+        : `Lines left: ${trainMode === 'white' ? whiteLinesLeft : blackLinesLeft}`
+    const progressText = `${linesLeftText} · Finished this session: ${linesFinished}`
 
     const persistTraining = useCallback(() => {
         const currentPaths = pathsRef.current
@@ -654,6 +649,7 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
 
     const onTrainingChanged = useCallback(() => {
         persistTraining()
+        setProgressTick((tick) => tick + 1)
     }, [persistTraining])
 
     const beginLesson = useCallback((
@@ -688,6 +684,7 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
     }, [trainingDepth])
 
     const onLessonComplete = useCallback(() => {
+        if (targetPathRef.current) setLinesFinished((count) => count + 1)
         beginLesson(trainMode, whiteRef.current, blackRef.current)
     }, [beginLesson, trainMode])
 
@@ -701,6 +698,7 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
         if (blackRepertoire) resetNeedsPractice(blackRepertoire.root)
         persistTraining()
         setTrainingRevision((revision) => revision + 1)
+        setLinesFinished(0)
         beginLesson(trainMode, whiteRepertoire, blackRepertoire, { resetSession: true })
     }
 
@@ -780,7 +778,7 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
             <section className="flex-1 space-y-5">
                 <header>
                     <p className="mt-2 text-sm leading-relaxed text-slate-400">
-                        White and black repertoires load automatically from Documents/GrayMatter.
+                        White and black repertoires load automatically from Google Drive (My Drive/Tom/Chess/GrayMatter).
                         Progress is saved to TrainingStatus.json after each practiced move. Choose
                         Train Both to alternate randomly between the two books, or lock training to
                         one side. Only lines with unpracticed moves for your side are selected.
@@ -857,8 +855,7 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
             <div className="board-panel w-full max-w-[min(100%,28rem)] shrink-0 self-center md:self-start">
                 <TrainerChessboard
                     root={ready ? (activeRepertoire?.root ?? null) : null}
-                    terminalLineCount={activeRepertoire?.terminalLineCount ?? 0}
-                    terminalPathKeys={activeRepertoire?.terminalPathKeys ?? EMPTY_PATH_KEYS}
+                    progressText={progressText}
                     playerSide={activeSide}
                     targetPath={targetPath}
                     trainingDepth={trainingDepth}

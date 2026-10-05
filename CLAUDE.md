@@ -20,9 +20,9 @@ There is no test suite and no lint script configured. Type-checking via `tsc -b`
 
 ### Process split
 
-- `electron/main.cjs` — Electron main process. Owns all filesystem access and exposes it over `ipcMain.handle`. Resolves a fixed set of file paths under `Documents/GrayMatter/` (`PATHS` constant): white/black repertoire PGNs, `TrainingStatus.json`, `settings.json`, the puzzle CSV, `PuzzleStatus.json`. Nothing in the renderer touches the filesystem directly.
+- `electron/main.cjs` — Electron main process. Owns all filesystem access and exposes it over `ipcMain.handle`. Resolves a fixed set of file paths under the hard-coded Google Drive folder `G:/My Drive/Tom/Chess/GrayMatter` (`GRAYMATTER_DIR` / `PATHS` constants; shared between the user's desktop and laptop via Drive sync): white/black repertoire PGNs, `TrainingStatus.json`, `settings.json`, the puzzle CSV, `PuzzleStatus.json`. Nothing in the renderer touches the filesystem directly.
 - `electron/preload.cjs` — context-bridges `window.graymatter` (`getPaths`, `readTextFile`, `writeTextFile`, `fetchNextPuzzle`) into the renderer with `contextIsolation: true` / `nodeIntegration: false` / `sandbox: true`.
-- `electron/puzzleStream.cjs` — streams the (large) Lichess puzzle CSV line-by-line with `readline` rather than loading it into memory, so puzzle lookups stay cheap regardless of file size. Tracks a `lastLineNumber` cursor in `PuzzleStatus.json` and wraps around to the start when it runs off the end of the file.
+- `electron/puzzleStream.cjs` — streams the (~1 GB) Lichess puzzle CSV line-by-line rather than loading it into memory. Tracks a `nextByteOffset` cursor in `PuzzleStatus.json` and opens the stream at that offset, so each fetch only reads from the cursor to the next match regardless of file size or position; wraps around to the first data row when it runs off the end of the file. The header is read separately (`readCsvHeader`) to resolve column indices.
 - `src/graymatter.d.ts` — the renderer-side type contract for `window.graymatter`; keep this in sync with `preload.cjs` any time the IPC surface changes (three places to update together: `main.cjs` handler, `preload.cjs` bridge, `graymatter.d.ts` types).
 
 Renderer code always checks `window.graymatter` before using it, since `npm run dev:web` runs without Electron and that global won't exist — the affected pages show a "run this app in Electron" error state instead of crashing.
@@ -39,7 +39,7 @@ Flow: `openings.tsx` loads both PGNs on mount → parses each into a `ParsedRepe
 
 ### Puzzles mode
 
-`src/puzzles.tsx` (rating range + theme filter UI) → IPC `fetchNextPuzzle` → `electron/puzzleStream.cjs` streams `lichess_db_puzzles.csv` starting after the last-seen line, returns the first match, advances the cursor, wraps to line 0 if it reaches EOF without a match. `src/puzzleBoard.tsx` plays the puzzle's setup move automatically, then the trainee must match the CSV's expected UCI move at each of their turns (wrong moves that aren't checkmate just revert); supports hint (highlights the from-square) and "play solution" (auto-plays out the remaining line).
+`src/puzzles.tsx` (rating range + theme filter UI) → IPC `fetchNextPuzzle` → `electron/puzzleStream.cjs` streams `lichess_db_puzzles.csv` starting at the saved byte offset, returns the first match, advances the cursor, wraps to line 0 if it reaches EOF without a match. `src/puzzleBoard.tsx` plays the puzzle's setup move automatically, then the trainee must match the CSV's expected UCI move at each of their turns (wrong moves that aren't checkmate just revert); supports hint (highlights the from-square) and "play solution" (auto-plays out the remaining line).
 
 ### Play mode
 

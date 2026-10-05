@@ -192,6 +192,25 @@ export function collectPracticeTerminalPaths(
     return [...byKey.values()]
 }
 
+/**
+ * True when a trainee move at or after ply `fromPly` along `path` still needs practice,
+ * i.e. the trainee still has a move of their own to make in this drill line.
+ */
+export function pathHasPracticeAhead(
+    root: Node,
+    path: readonly string[],
+    fromPly: number,
+    playerSide: 'w' | 'b',
+): boolean {
+    let node: Node | undefined = root
+    for (let i = 0; i < path.length; i++) {
+        node = node.children.get(path[i]!)
+        if (!node) return false
+        if (i >= fromPly && isPlayerPly(playerSide, i) && node.needsPractice) return true
+    }
+    return false
+}
+
 export function pickRandomPracticePath(
     root: Node,
     playerSide: 'w' | 'b',

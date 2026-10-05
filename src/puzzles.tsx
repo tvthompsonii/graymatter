@@ -8,10 +8,10 @@ import {
     type PuzzleThemeId,
 } from './puzzleCsv'
 
-const RATING_MIN = 600
-const RATING_MAX = 3000
-const DEFAULT_RATING_LO = 1500
-const DEFAULT_RATING_HI = 1800
+const RATING_MIN = 300
+const RATING_MAX = 3400
+const DEFAULT_RATING_LO = 1700
+const DEFAULT_RATING_HI = 1900
 
 function DualRatingSlider({
     minRating,

@@ -1,6 +1,5 @@
 const fs = require('fs')
 const path = require('path')
-const readline = require('readline')
 
 function parseCsvLine(line) {
     const result = []
@@ -52,77 +51,135 @@ function puzzleMatchesFilters(puzzle, lo, hi, themeSet) {
     return puzzle.themes.some((theme) => themeSet.has(theme))
 }
 
+
+const HEADER_PROBE_BYTES = 64 * 1024
+
 /**
- * Stream the CSV and return the first matching puzzle after afterLine (up to untilLine).
- * Stops reading as soon as a match is found.
+ * Read the CSV header line and resolve column indices.
+ * Returns the indices plus the byte offset where data rows begin.
  */
-async function findNextPuzzleFromCsv(filePath, afterLine, filters, untilLine = Infinity) {
-    const lo = Math.min(filters.minRating, filters.maxRating)
-    const hi = Math.max(filters.minRating, filters.maxRating)
-    const themeSet = new Set(filters.themes ?? [])
-    const startAfter = Number.isFinite(afterLine) ? afterLine : -1
-    const stopAt = Number.isFinite(untilLine) ? untilLine : Infinity
-
-    let indices = null
-    let lineNumber = 0
-
-    const stream = fs.createReadStream(filePath, { encoding: 'utf8' })
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
-
+async function readCsvHeader(filePath) {
+    const handle = await fs.promises.open(filePath, 'r')
     try {
-        for await (const line of rl) {
-            const trimmed = line.trim()
-            if (!trimmed) {
-                lineNumber++
-                continue
-            }
+        const buf = Buffer.alloc(HEADER_PROBE_BYTES)
+        const { bytesRead } = await handle.read(buf, 0, buf.length, 0)
+        const newline = buf.subarray(0, bytesRead).indexOf(0x0a)
+        if (newline < 0) throw new Error('Puzzle CSV header line not found.')
 
-            if (!indices) {
-                const header = parseCsvLine(trimmed)
-                const idIdx = header.indexOf('PuzzleId')
-                const fenIdx = header.indexOf('FEN')
-                const movesIdx = header.indexOf('Moves')
-                const ratingIdx = header.indexOf('Rating')
-                const nbPlaysIdx = header.indexOf('NbPlays')
-                const themesIdx = header.indexOf('Themes')
+        const header = parseCsvLine(
+            buf.toString('utf8', 0, newline).replace(/^﻿/, '').trim(),
+        )
+        const idIdx = header.indexOf('PuzzleId')
+        const fenIdx = header.indexOf('FEN')
+        const movesIdx = header.indexOf('Moves')
+        const ratingIdx = header.indexOf('Rating')
+        const nbPlaysIdx = header.indexOf('NbPlays')
+        const themesIdx = header.indexOf('Themes')
 
-                if (idIdx < 0 || fenIdx < 0 || movesIdx < 0 || ratingIdx < 0 || themesIdx < 0) {
-                    throw new Error('Puzzle CSV header is missing required columns.')
-                }
+        if (idIdx < 0 || fenIdx < 0 || movesIdx < 0 || ratingIdx < 0 || themesIdx < 0) {
+            throw new Error('Puzzle CSV header is missing required columns.')
+        }
 
-                indices = {
-                    id: idIdx,
-                    fen: fenIdx,
-                    moves: movesIdx,
-                    rating: ratingIdx,
-                    nbPlays: nbPlaysIdx >= 0 ? nbPlaysIdx : -1,
-                    themes: themesIdx,
-                }
-                lineNumber++
-                continue
-            }
-
-            if (lineNumber > startAfter && lineNumber <= stopAt) {
-                const cols = parseCsvLine(trimmed)
-                const puzzle = parsePuzzleRow(cols, indices)
-                if (puzzle && puzzleMatchesFilters(puzzle, lo, hi, themeSet)) {
-                    return { ...puzzle, lineNumber }
-                }
-            }
-
-            lineNumber++
+        return {
+            indices: {
+                id: idIdx,
+                fen: fenIdx,
+                moves: movesIdx,
+                rating: ratingIdx,
+                nbPlays: nbPlaysIdx >= 0 ? nbPlaysIdx : -1,
+                themes: themesIdx,
+            },
+            dataStart: newline + 1,
         }
     }
     finally {
-        rl.close()
+        await handle.close()
+    }
+}
+
+/**
+ * Yield { text, start, end } for each line from byte offset `start`, where
+ * start/end are the byte offsets of the line and of the byte after its newline.
+ */
+async function* readLinesFrom(filePath, start) {
+    const stream = fs.createReadStream(filePath, { start })
+    let pending = null
+    let pendingStart = start
+
+    try {
+        for await (const chunk of stream) {
+            const buf = pending ? Buffer.concat([pending, chunk]) : chunk
+            const bufStart = pendingStart
+            let pos = 0
+            let newline
+            while ((newline = buf.indexOf(0x0a, pos)) >= 0) {
+                yield {
+                    text: buf.toString('utf8', pos, newline),
+                    start: bufStart + pos,
+                    end: bufStart + newline + 1,
+                }
+                pos = newline + 1
+            }
+            pending = pos < buf.length ? buf.subarray(pos) : null
+            pendingStart = bufStart + pos
+        }
+
+        if (pending) {
+            yield {
+                text: pending.toString('utf8'),
+                start: pendingStart,
+                end: pendingStart + pending.length,
+            }
+        }
+    }
+    finally {
         stream.destroy()
+    }
+}
+
+/**
+ * Stream the CSV from byte offset `afterOffset` and return the first matching puzzle
+ * whose line starts before `untilOffset`. The returned `nextByteOffset` is where the
+ * line after the match begins, so the next call can resume there without rereading.
+ * An offset of 0 (or one past the end of the file) starts at the first data row.
+ */
+async function findNextPuzzleFromCsv(filePath, afterOffset, filters, untilOffset = Infinity) {
+    const lo = Math.min(filters.minRating, filters.maxRating)
+    const hi = Math.max(filters.minRating, filters.maxRating)
+    const themeSet = new Set(filters.themes ?? [])
+    const stopAt = Number.isFinite(untilOffset) ? untilOffset : Infinity
+
+    const { indices, dataStart } = await readCsvHeader(filePath)
+    const { size } = await fs.promises.stat(filePath)
+
+    const resume = Number.isFinite(afterOffset) && afterOffset > dataStart && afterOffset < size
+    // When resuming, start one byte early and discard the first line: it is either the
+    // empty remainder of the previous line's newline, or (if the file changed under a
+    // saved offset) the tail of a partial line.
+    let skipFirst = resume
+    const readFrom = resume ? afterOffset - 1 : dataStart
+
+    for await (const line of readLinesFrom(filePath, readFrom)) {
+        if (skipFirst) {
+            skipFirst = false
+            continue
+        }
+        if (line.start >= stopAt) break
+
+        const trimmed = line.text.trim()
+        if (!trimmed) continue
+
+        const puzzle = parsePuzzleRow(parseCsvLine(trimmed), indices)
+        if (puzzle && puzzleMatchesFilters(puzzle, lo, hi, themeSet)) {
+            return { ...puzzle, nextByteOffset: line.end }
+        }
     }
 
     return null
 }
 
 const DEFAULT_PUZZLE_STATUS = {
-    lastLineNumber: -1,
+    nextByteOffset: 0,
     lastPuzzleId: null,
 }
 
@@ -131,9 +188,9 @@ async function readPuzzleStatus(statusPath) {
         const text = await fs.promises.readFile(statusPath, 'utf8')
         const parsed = JSON.parse(text)
         return {
-            lastLineNumber: Number.isFinite(parsed.lastLineNumber)
-                ? parsed.lastLineNumber
-                : DEFAULT_PUZZLE_STATUS.lastLineNumber,
+            nextByteOffset: Number.isFinite(parsed.nextByteOffset) && parsed.nextByteOffset >= 0
+                ? parsed.nextByteOffset
+                : DEFAULT_PUZZLE_STATUS.nextByteOffset,
             lastPuzzleId: parsed.lastPuzzleId ?? null,
             updatedAt: parsed.updatedAt ?? null,
         }
@@ -148,7 +205,7 @@ async function writePuzzleStatus(statusPath, status) {
     await fs.promises.writeFile(
         statusPath,
         JSON.stringify({
-            lastLineNumber: status.lastLineNumber,
+            nextByteOffset: status.nextByteOffset,
             lastPuzzleId: status.lastPuzzleId,
             updatedAt: new Date().toISOString(),
         }, null, 4),
