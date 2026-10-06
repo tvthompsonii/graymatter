@@ -1,37 +1,53 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { APP_VERSION } from './appVersion'
 import { PuzzleChessboard } from './puzzleBoard'
 import {
     PUZZLE_THEME_OPTIONS,
     type Puzzle,
     type PuzzleThemeId,
 } from './puzzleCsv'
-
-const RATING_MIN = 300
-const RATING_MAX = 3400
-const DEFAULT_RATING_LO = 1700
-const DEFAULT_RATING_HI = 1900
+import {
+    PUZZLE_RATING_MAX as RATING_MAX,
+    PUZZLE_RATING_MIN as RATING_MIN,
+    type AppSettings,
+} from './settings'
 
 function DualRatingSlider({
     minRating,
     maxRating,
     onChange,
+    onCommit,
 }: {
     minRating: number
     maxRating: number
+    /** Every step while dragging (updates the display only). */
     onChange: (lo: number, hi: number) => void
+    /** The range once a thumb is released. */
+    onCommit: (lo: number, hi: number) => void
 }) {
     const lo = Math.min(minRating, maxRating)
     const hi = Math.max(minRating, maxRating)
 
+    // The native `change` event fires when a thumb is released (React's onChange fires on every
+    // step), so the range is only saved once the user lets go.
+    const trackRef = useRef<HTMLDivElement>(null)
+    const onCommitRef = useRef(onCommit)
+    onCommitRef.current = onCommit
+    useEffect(() => {
+        const inputs = [...(trackRef.current?.querySelectorAll('input') ?? [])]
+        const commit = () => {
+            const [a, b] = inputs.map((input) => Number(input.value))
+            onCommitRef.current(Math.min(a!, b!), Math.max(a!, b!))
+        }
+        for (const input of inputs) input.addEventListener('change', commit)
+        return () => {
+            for (const input of inputs) input.removeEventListener('change', commit)
+        }
+    }, [])
+
     return (
-        <div className="space-y-2">
-            <div className="flex justify-between text-xs font-mono text-slate-400">
-                <span>{lo}</span>
-                <span>{hi}</span>
-            </div>
-            <div className="relative h-8">
+        <div>
+            <div ref={trackRef} className="relative h-8">
                 <div className="absolute top-1/2 h-1.5 w-full -translate-y-1/2 rounded-full bg-slate-700" />
                 <div
                     className="absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-amber-500/70"
@@ -71,15 +87,20 @@ function DualRatingSlider({
     )
 }
 
-export function PuzzlesPage() {
+type PuzzlesPageProps = {
+    settings: AppSettings
+    onSettingsChange: (patch: Partial<AppSettings>) => void
+}
+
+export function PuzzlesPage({ settings, onSettingsChange }: PuzzlesPageProps) {
     const [loadError, setLoadError] = useState<string | null>(null)
-    const [selectedThemes, setSelectedThemes] = useState<Set<PuzzleThemeId>>(new Set())
-    const [ratingLo, setRatingLo] = useState(DEFAULT_RATING_LO)
-    const [ratingHi, setRatingHi] = useState(DEFAULT_RATING_HI)
+    const selectedThemes = useMemo(() => new Set(settings.puzzleThemes), [settings.puzzleThemes])
+    // The slider moves a local draft; the range is saved to settings when a thumb is released.
+    const [ratingLo, setRatingLo] = useState(settings.puzzleRatingMin)
+    const [ratingHi, setRatingHi] = useState(settings.puzzleRatingMax)
     const [activePuzzle, setActivePuzzle] = useState<Puzzle | null>(null)
     const [puzzleKey, setPuzzleKey] = useState(0)
     const [loading, setLoading] = useState(false)
-    const [status, setStatus] = useState('Press Next puzzle to start.')
     const [ready, setReady] = useState(false)
     const [hintTrigger, setHintTrigger] = useState(0)
     const [playSolutionTrigger, setPlaySolutionTrigger] = useState(0)
@@ -89,7 +110,7 @@ export function PuzzlesPage() {
     const filtersRef = useRef({ ratingLo, ratingHi, selectedThemes })
     filtersRef.current = { ratingLo, ratingHi, selectedThemes }
 
-    const fetchNextPuzzle = useCallback(async (options?: { afterSolve?: boolean }) => {
+    const fetchNextPuzzle = useCallback(async () => {
         const api = window.graymatter?.fetchNextPuzzle
         if (!api) {
             setLoadError('GrayMatter puzzle API is unavailable. Run this app in Electron.')
@@ -98,13 +119,9 @@ export function PuzzlesPage() {
 
         const generation = ++fetchGenerationRef.current
         const { ratingLo: lo, ratingHi: hi, selectedThemes: themes } = filtersRef.current
-        const afterSolve = options?.afterSolve ?? false
 
         setLoading(true)
         setLoadError(null)
-        if (!afterSolve) {
-            setStatus('Loading next puzzle…')
-        }
 
         try {
             const result = await api({
@@ -121,21 +138,16 @@ export function PuzzlesPage() {
                     'No puzzles in the database match the current filters. '
                     + 'Try widening the rating range or changing themes.',
                 )
-                setStatus('No matching puzzles found.')
                 return
             }
 
             setActivePuzzle(result.puzzle)
             setPuzzleKey((key) => key + 1)
-            if (!afterSolve) {
-                setStatus(`Puzzle ${result.puzzle.id} · rating ${result.puzzle.rating}`)
-            }
         }
         catch (err) {
             if (generation !== fetchGenerationRef.current) return
             const message = err instanceof Error ? err.message : String(err)
             setLoadError(`Could not read lichess_db_puzzles.csv: ${message}`)
-            setStatus('Could not load puzzles.')
             setActivePuzzle(null)
         }
         finally {
@@ -150,17 +162,21 @@ export function PuzzlesPage() {
     }, [fetchNextPuzzle])
 
     const toggleTheme = (themeId: PuzzleThemeId) => {
-        setSelectedThemes((prev) => {
-            const next = new Set(prev)
-            if (next.has(themeId)) next.delete(themeId)
-            else next.add(themeId)
-            return next
-        })
+        const next = selectedThemes.has(themeId)
+            ? settings.puzzleThemes.filter((id) => id !== themeId)
+            : [...settings.puzzleThemes, themeId]
+        onSettingsChange({ puzzleThemes: next })
     }
 
     const onRatingChange = (lo: number, hi: number) => {
         setRatingLo(lo)
         setRatingHi(hi)
+    }
+
+    const onRatingCommit = (lo: number, hi: number) => {
+        if (lo !== settings.puzzleRatingMin || hi !== settings.puzzleRatingMax) {
+            onSettingsChange({ puzzleRatingMin: lo, puzzleRatingMax: hi })
+        }
     }
 
     const handleNextPuzzle = () => {
@@ -186,53 +202,60 @@ export function PuzzlesPage() {
                         database. The computer plays the setup move; you find the winning
                         continuation. Progress is saved in PuzzleStatus.json.
                     </p>
-                    <p className="mt-2 font-mono text-xs text-slate-500">
-                        Version {APP_VERSION}
-                    </p>
                 </header>
 
-                <fieldset className="space-y-3 rounded-xl border border-slate-700/80 bg-slate-900/50 p-4">
-                    <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Themes
-                    </legend>
-                    <div className="flex flex-wrap gap-4">
-                        {PUZZLE_THEME_OPTIONS.map(({ id, label }) => (
-                            <label
-                                key={id}
-                                className="flex cursor-pointer items-center gap-2 text-sm text-slate-200"
-                            >
-                                <input
-                                    type="checkbox"
-                                    checked={selectedThemes.has(id)}
-                                    onChange={() => toggleTheme(id)}
-                                    className="accent-amber-500"
-                                />
-                                {label}
-                            </label>
-                        ))}
+                <div className="space-y-3 rounded-xl border border-slate-700/80 bg-slate-900/50 p-4">
+                    <fieldset className="space-y-2">
+                        <legend className="text-sm font-medium text-slate-200">Themes</legend>
+                        <div className="space-y-2 pl-4">
+                            <div className="flex flex-wrap gap-4">
+                                {PUZZLE_THEME_OPTIONS.map(({ id, label }) => (
+                                    <label
+                                        key={id}
+                                        className="flex cursor-pointer items-center gap-2 text-sm text-slate-200"
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={selectedThemes.has(id)}
+                                            onChange={() => toggleTheme(id)}
+                                            className="accent-amber-500"
+                                        />
+                                        {label}
+                                    </label>
+                                ))}
+                            </div>
+                            <p className="text-xs text-slate-500">
+                                Leave all unchecked to include any theme.
+                            </p>
+                        </div>
+                    </fieldset>
+                    <div className="space-y-1 border-t border-slate-700/60 pt-3">
+                        <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium text-slate-200">Rating range</span>
+                            <span className="rounded-md bg-amber-500/15 px-2 py-0.5 font-mono text-sm text-amber-200">
+                                {Math.min(ratingLo, ratingHi)}-{Math.max(ratingLo, ratingHi)}
+                            </span>
+                        </div>
+                        <div className="pl-4">
+                            <DualRatingSlider
+                                minRating={ratingLo}
+                                maxRating={ratingHi}
+                                onChange={onRatingChange}
+                                onCommit={onRatingCommit}
+                            />
+                            <p className="mt-1 text-xs text-slate-500">
+                                Only puzzles rated within this range are served.
+                            </p>
+                        </div>
                     </div>
-                    <p className="text-xs text-slate-500">
-                        Leave all unchecked to include any theme.
-                    </p>
-                </fieldset>
-
-                <fieldset className="space-y-3 rounded-xl border border-slate-700/80 bg-slate-900/50 p-4">
-                    <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Rating range
-                    </legend>
-                    <DualRatingSlider
-                        minRating={ratingLo}
-                        maxRating={ratingHi}
-                        onChange={onRatingChange}
-                    />
-                </fieldset>
+                </div>
 
                 <div className="flex flex-wrap gap-2">
                     <button
                         type="button"
                         onClick={() => setHintTrigger((trigger) => trigger + 1)}
                         disabled={loading || !ready || !activePuzzle || solutionPlaying}
-                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-amber-500/60 enabled:hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
+                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-emerald-500/60 enabled:hover:text-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                         Hint
                     </button>
@@ -251,10 +274,6 @@ export function PuzzlesPage() {
                         {loadError}
                     </p>
                 )}
-
-                <p className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-300">
-                    {status}
-                </p>
             </section>
 
             <div className="w-full max-w-[min(100%,28rem)] shrink-0 space-y-2 self-center md:self-start">
@@ -266,8 +285,7 @@ export function PuzzlesPage() {
                             hintTrigger={hintTrigger}
                             playSolutionTrigger={playSolutionTrigger}
                             onPlaySolutionComplete={handlePlaySolutionComplete}
-                            onSolved={() => void fetchNextPuzzle({ afterSolve: true })}
-                            onStatusChange={setStatus}
+                            onSolved={() => void fetchNextPuzzle()}
                         />
                     ) : (
                         <div className="flex aspect-square items-center justify-center rounded-xl bg-slate-900/60 text-sm text-slate-500">

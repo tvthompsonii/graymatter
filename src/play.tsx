@@ -8,7 +8,6 @@ import type {
     SquareHandlerArgs,
 } from 'react-chessboard'
 
-import { APP_VERSION } from './appVersion'
 import { boardChrome, customPieces, MOVE_ANIMATION_MS } from './boardTheme'
 
 function wait(ms: number): Promise<void> {
@@ -271,9 +270,6 @@ export function PlayPage() {
                     <p className="mt-2 text-sm leading-relaxed text-slate-400">
                         Play against a bot. Engine strength and openings will come later; for now you
                         move White and Black prefers captures, then checks, otherwise a random move.
-                    </p>
-                    <p className="mt-2 font-mono text-xs text-slate-500">
-                        Version {APP_VERSION}
                     </p>
                 </header>
 

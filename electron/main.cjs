@@ -60,8 +60,12 @@ ipcMain.handle('graymatter:fetchNextPuzzle', async (_event, filters) => {
 
 function createWindow() {
     const win = new BrowserWindow({
-        width: 1280,
-        height: 860,
+        // Content size (not including the frame), fitted to the page layout: the 992px content
+        // column plus a 48px side margin each way (matching the gap above the nav labels), and
+        // a 72px (1.5x) margin below the board's info line.
+        useContentSize: true,
+        width: 1088,
+        height: 666,
         minWidth: 900,
         minHeight: 640,
         show: false,

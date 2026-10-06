@@ -8,7 +8,16 @@ import type {
     SquareHandlerArgs,
 } from 'react-chessboard'
 
-import { boardChrome, customPieces, MOVE_ANIMATION_MS } from './boardTheme'
+import {
+    boardChrome,
+    customPieces,
+    HINT_SQUARE_STYLE,
+    MOVE_ANIMATION_MS,
+    SELECTED_SQUARE_STYLE,
+    withSquareOutlines,
+    WRONG_MOVE_DISPLAY_MS,
+    WRONG_SQUARE_STYLE,
+} from './boardTheme'
 import type { Puzzle } from './puzzleCsv'
 
 function wait(ms: number): Promise<void> {
@@ -71,16 +80,9 @@ export function playerColorForPuzzle(puzzle: Puzzle): 'w' | 'b' {
     return game.turn()
 }
 
-/** Soft green disc behind the piece to move for a hint (matches Play checkmate glow). */
-const HINT_PIECE_STYLE: CSSProperties = {
-    background:
-        'radial-gradient(ellipse at center, rgba(72, 187, 98, 0.90) 0%, rgba(72, 187, 98, 0.75) 45%, transparent 80%)',
-}
-
 type PuzzleChessboardProps = {
     puzzle: Puzzle
     onSolved: () => void
-    onStatusChange?: (status: string) => void
     hintTrigger?: number
     playSolutionTrigger?: number
     onPlaySolutionComplete?: (success: boolean) => void
@@ -89,7 +91,6 @@ type PuzzleChessboardProps = {
 export function PuzzleChessboard({
     puzzle,
     onSolved,
-    onStatusChange,
     hintTrigger = 0,
     playSolutionTrigger = 0,
     onPlaySolutionComplete,
@@ -110,6 +111,7 @@ export function PuzzleChessboard({
     const [optionSquares, setOptionSquares] = useState<Record<string, CSSProperties>>({})
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({})
     const [hintSquare, setHintSquare] = useState<string | null>(null)
+    const [wrongSquare, setWrongSquare] = useState<string | null>(null)
 
     const clearSelection = useCallback(() => {
         setSelectedSquare(null)
@@ -158,16 +160,14 @@ export function PuzzleChessboard({
     ): Promise<boolean> => playUci(uci, runId), [playUci])
 
     const finishPuzzle = useCallback(async (runId: number) => {
-        onStatusChange?.('Correct! Loading next puzzle...')
         await wait(1000)
         if (runId === runIdRef.current) onSolvedRef.current()
-    }, [onStatusChange])
+    }, [])
 
     const playSolution = useCallback(async (runId: number) => {
         busyRef.current = true
         clearSelection()
         clearHint()
-        onStatusChange?.('Playing solution...')
 
         let success = false
         try {
@@ -177,7 +177,6 @@ export function PuzzleChessboard({
                 if (!(await playUci(uci, runId, SOLUTION_MOVE_PAUSE_MS))) return
             }
 
-            onStatusChange?.('Playing solution... Done.')
             await wait(SOLUTION_DONE_PAUSE_MS)
             if (runId !== runIdRef.current) return
 
@@ -189,7 +188,7 @@ export function PuzzleChessboard({
                 onPlaySolutionCompleteRef.current?.(success)
             }
         }
-    }, [clearHint, clearSelection, onStatusChange, playUci, puzzle])
+    }, [clearHint, clearSelection, playUci, puzzle])
 
     const continueAfterPlayerMove = useCallback(async (runId: number) => {
         const { moves } = puzzle
@@ -199,12 +198,11 @@ export function PuzzleChessboard({
                 if (!(await playComputerUci(nextUci, runId))) return
                 continue
             }
-            onStatusChange?.('Your move — find the best continuation.')
             return
         }
         busyRef.current = false
         await finishPuzzle(runId)
-    }, [finishPuzzle, onStatusChange, playComputerUci, playerColor, puzzle])
+    }, [finishPuzzle, playComputerUci, playerColor, puzzle])
 
     const startPuzzle = useCallback(async () => {
         const runId = ++runIdRef.current
@@ -220,7 +218,6 @@ export function PuzzleChessboard({
 
         if (!puzzle.moves.length) {
             busyRef.current = false
-            onStatusChange?.('Invalid puzzle — no moves.')
             return
         }
 
@@ -231,7 +228,7 @@ export function PuzzleChessboard({
 
         busyRef.current = false
         await continueAfterPlayerMove(runId)
-    }, [clearHint, clearSelection, continueAfterPlayerMove, onStatusChange, playComputerUci, puzzle, syncBoard])
+    }, [clearHint, clearSelection, continueAfterPlayerMove, playComputerUci, puzzle, syncBoard])
 
     useEffect(() => {
         if (!hintTrigger) return
@@ -309,11 +306,25 @@ export function PuzzleChessboard({
         const isMate = game.isCheckmate()
 
         if (!isCorrect && !isMate) {
+            // Leave the wrong move on the board, outlined in red, then take it back. The game
+            // itself is restored immediately; only the displayed position lags. busyRef blocks
+            // input (and Hint) until then.
+            const wrongFen = game.fen()
             game.load(fenBefore)
             clearSelection()
-            syncBoard(game)
-            onStatusChange?.('Not the best move — try again.')
-            return false
+            setWrongSquare(targetSquare)
+            setFen(wrongFen)
+            busyRef.current = true
+            const runId = runIdRef.current
+            void (async () => {
+                await wait(WRONG_MOVE_DISPLAY_MS)
+                setWrongSquare(null)
+                // A newer run (e.g. Next puzzle playing the solution) owns the board now.
+                if (runId !== runIdRef.current) return
+                busyRef.current = false
+                syncBoard(gameRef.current)
+            })()
+            return true
         }
 
         moveIndexRef.current++
@@ -335,7 +346,6 @@ export function PuzzleChessboard({
         clearSelection,
         clearHint,
         continueAfterPlayerMove,
-        onStatusChange,
         playerColor,
         puzzle.moves,
         syncBoard,
@@ -385,21 +395,22 @@ export function PuzzleChessboard({
         }
     }, [attemptPlayerMove, clearSelection, getMoveOptions, playerColor, selectedSquare])
 
-    const highlights = {
-        ...optionSquares,
-        ...(lastMoveSquares.from && {
-            [lastMoveSquares.from]: { backgroundColor: 'rgba(179, 197, 18, 0.4)' },
-        }),
-        ...(lastMoveSquares.to && {
-            [lastMoveSquares.to]: { backgroundColor: 'rgba(179, 197, 18, 0.4)' },
-        }),
-        ...(selectedSquare && {
-            [selectedSquare]: { boxShadow: 'inset 0 0 0 4px rgba(245, 158, 11, 0.75)' },
-        }),
-        ...(hintSquare && {
-            [hintSquare]: HINT_PIECE_STYLE,
-        }),
-    }
+    const highlights = withSquareOutlines(
+        {
+            ...optionSquares,
+            ...(lastMoveSquares.from && {
+                [lastMoveSquares.from]: { backgroundColor: 'rgba(179, 197, 18, 0.4)' },
+            }),
+            ...(lastMoveSquares.to && {
+                [lastMoveSquares.to]: { backgroundColor: 'rgba(179, 197, 18, 0.4)' },
+            }),
+        },
+        [
+            [hintSquare, HINT_SQUARE_STYLE],
+            [selectedSquare, SELECTED_SQUARE_STYLE],
+            [wrongSquare, WRONG_SQUARE_STYLE],
+        ],
+    )
 
     return (
         <Chessboard

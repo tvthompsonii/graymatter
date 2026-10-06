@@ -8,8 +8,16 @@ import type {
     SquareHandlerArgs,
 } from 'react-chessboard'
 
-import { APP_VERSION } from './appVersion'
-import { boardChrome, customPieces, MOVE_ANIMATION_MS } from './boardTheme'
+import {
+    boardChrome,
+    customPieces,
+    HINT_SQUARE_STYLE,
+    MOVE_ANIMATION_MS,
+    SELECTED_SQUARE_STYLE,
+    withSquareOutlines,
+    WRONG_MOVE_DISPLAY_MS,
+    WRONG_SQUARE_STYLE,
+} from './boardTheme'
 import type { GraymatterPaths } from './graymatter'
 import {
     collectPracticeTerminalPaths,
@@ -25,6 +33,7 @@ import {
     type Node,
 } from './moveTree'
 import { parsePgnToRepertoire, type ParsedRepertoire } from './pgnPaths'
+import type { AppSettings, TrainMode } from './settings'
 import {
     applyDualTrainingStatus,
     parseTrainingFileJson,
@@ -32,7 +41,6 @@ import {
 } from './trainingExport'
 
 export type Side = 'w' | 'b'
-export type TrainMode = 'both' | 'white' | 'black'
 
 export type TrainerChessboardProps = {
     root: Node | null
@@ -45,6 +53,10 @@ export type TrainerChessboardProps = {
     sessionResetKey: number
     lessonKey: number
     trainingRevision: number
+    /** Bump to outline the square of the piece the trainee should move next. */
+    hintTrigger: number
+    /** SAN moves played so far in the current line; owned by the page so a depth change can inspect it. */
+    historySansRef: { current: string[] }
     onStatusChange: (status: string) => void
     onLessonComplete: () => void
     onTrainingChanged: () => void
@@ -58,7 +70,8 @@ function normalizeSan(san: string): string {
     return san.replace(/[+#]+$/, '').trim()
 }
 
-function describeDragAttempt(game: Chess, from: Square, to: Square): string | null {
+/** FEN after playing from→to (trying promotions), or null when the move is illegal. */
+function fenAfterAttempt(game: Chess, from: Square, to: Square): string | null {
     const piece = game.get(from)
     const tries: Array<'q' | 'r' | 'b' | 'n' | undefined> =
         piece?.type === 'p'
@@ -74,7 +87,7 @@ function describeDragAttempt(game: Chess, from: Square, to: Square): string | nu
                 promotion ? { from, to, promotion } : { from, to },
                 { strict: false },
             )
-            if (move) return move.san
+            if (move) return trial.fen()
         }
         catch {
             // Try the next promotion choice.
@@ -151,12 +164,19 @@ export function TrainerChessboard({
     sessionResetKey,
     lessonKey,
     trainingRevision,
+    hintTrigger,
+    historySansRef,
     onStatusChange,
     onLessonComplete,
     onTrainingChanged,
 }: TrainerChessboardProps) {
     const gameRef = useRef(new Chess())
-    const historySansRef = useRef<string[]>([])
+    const targetPathRef = useRef(targetPath)
+    targetPathRef.current = targetPath
+    // Read through a ref so a depth change alone doesn't re-settle the board; the page decides
+    // whether the current line survives a new depth (and swaps targetPath or starts a new lesson).
+    const trainingDepthRef = useRef(trainingDepth)
+    trainingDepthRef.current = trainingDepth
     const branchDrillsRef = useRef(new Map<string, Set<string>>())
     const settlingRef = useRef(false)
     const runIdRef = useRef(0)
@@ -169,9 +189,12 @@ export function TrainerChessboard({
     const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
     const [optionSquares, setOptionSquares] = useState({});
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({});
+    const [hintSquare, setHintSquare] = useState<string | null>(null)
+    const [wrongSquare, setWrongSquare] = useState<string | null>(null)
+    // True while a wrong move is displayed; blocks input until it is taken back.
+    const showingWrongMoveRef = useRef(false)
 
     const rebuildStatus = useCallback(() => {
-        const sideLabel = playerSide === 'w' ? 'White' : 'Black'
         if (!root) {
             onStatusChange('Loading repertoires…')
         }
@@ -179,11 +202,9 @@ export function TrainerChessboard({
             onStatusChange('All lines practiced. Reset training progress to start over.')
         }
         else {
-            onStatusChange(
-                `Training ${sideLabel}. ${progressText}. Drag when it is your move.`,
-            )
+            onStatusChange(progressText)
         }
-    }, [onStatusChange, playerSide, progressText, root, targetPath])
+    }, [onStatusChange, progressText, root, targetPath])
 
     useEffect(() => {
         rebuildStatus()
@@ -225,12 +246,15 @@ export function TrainerChessboard({
         leafHandledRef.current = false
         gameRef.current = new Chess()
         historySansRef.current = []
+        showingWrongMoveRef.current = false
         setSelectedSquare(null)
         setLastMoveSquares({})
         setOptionSquares({})
+        setHintSquare(null)
+        setWrongSquare(null)
 
         if (root && playerSide === 'b') {
-            const first = targetPath?.[0]
+            const first = targetPathRef.current?.[0]
                 ?? legalChildSans(gameRef.current, root).sort()[0]
             if (first) {
                 gameRef.current.move(first, { strict: false })
@@ -245,7 +269,7 @@ export function TrainerChessboard({
             await wait(MOVE_ANIMATION_MS)
 
         return runId
-    }, [playerSide, root, targetPath])
+    }, [historySansRef, playerSide, root])
 
     const settleAfterChange = useCallback(async () => {
         if (!root || settlingRef.current) return
@@ -256,7 +280,7 @@ export function TrainerChessboard({
             while (runId === runIdRef.current) {
                 const history = historySansRef.current
 
-                if (countPlayerMoves(history, playerSide) >= trainingDepth) {
+                if (countPlayerMoves(history, playerSide) >= trainingDepthRef.current) {
                     finishLineAndAdvance()
                     return
                 }
@@ -333,7 +357,7 @@ export function TrainerChessboard({
             }
 
             const endHistory = historySansRef.current
-            if (countPlayerMoves(endHistory, playerSide) >= trainingDepth) {
+            if (countPlayerMoves(endHistory, playerSide) >= trainingDepthRef.current) {
                 finishLineAndAdvance()
                 return
             }
@@ -351,8 +375,14 @@ export function TrainerChessboard({
         playerSide,
         root,
         targetPath,
-        trainingDepth,
     ])
+
+    // Restart the board only for a new lesson (or side/repertoire/session change). A targetPath or
+    // depth change alone keeps the current position; the effect below re-settles against it.
+    const startLessonRef = useRef(startLesson)
+    startLessonRef.current = startLesson
+    const settleAfterChangeRef = useRef(settleAfterChange)
+    settleAfterChangeRef.current = settleAfterChange
 
     useEffect(() => {
         const rootChanged = previousRootRef.current !== root
@@ -365,10 +395,10 @@ export function TrainerChessboard({
         }
 
         void (async () => {
-            await startLesson(false)
-            await settleAfterChange()
+            await startLessonRef.current(false)
+            await settleAfterChangeRef.current()
         })()
-    }, [playerSide, root, sessionResetKey, lessonKey, startLesson, settleAfterChange])
+    }, [playerSide, root, sessionResetKey, lessonKey])
 
     useEffect(() => {
         if (!root) return
@@ -392,7 +422,26 @@ export function TrainerChessboard({
         )
     }, [playerSide, root, targetPath])
 
+    const handledHintTriggerRef = useRef(hintTrigger)
+    useEffect(() => {
+        // Respond only to new Hint presses, not to lesson changes re-creating the callback.
+        if (hintTrigger === handledHintTriggerRef.current) return
+        handledHintTriggerRef.current = hintTrigger
+        if (showingWrongMoveRef.current) return
+
+        const san = legalPlayerSansNeedingPractice()[0]
+        if (!san) return
+        try {
+            const move = new Chess(gameRef.current.fen()).move(san, { strict: false })
+            if (move) setHintSquare(move.from)
+        }
+        catch {
+            // Repertoire move not playable here; no hint to show.
+        }
+    }, [hintTrigger, legalPlayerSansNeedingPractice])
+
     const canDragPiece = useCallback(({ piece }: PieceHandlerArgs): boolean => {
+        if (showingWrongMoveRef.current) return false
         if (piece.pieceType[0] !== playerSide) return false
         return legalPlayerSansNeedingPractice().length > 0
     }, [legalPlayerSansNeedingPractice, playerSide])
@@ -401,7 +450,7 @@ export function TrainerChessboard({
         sourceSquare: string,
         targetSquare: string | null,
     ): boolean => {
-        if (!root || !targetSquare) return false
+        if (!root || !targetSquare || showingWrongMoveRef.current) return false
         if (sourceSquare === targetSquare) {
             setSelectedSquare(null)
             return true
@@ -419,13 +468,25 @@ export function TrainerChessboard({
 
         const match = findMatchingOutcome(game, from, to, allowed)
         if (!match) {
-            const attempt = describeDragAttempt(game, from, to)
-            window.alert(
-                attempt
-                    ? `That move is not in the repertoire here.\nPlayed: ${attempt}\nAllowed: ${allowed.join(', ')}`
-                    : `Illegal move.\nAllowed from the file: ${allowed.join(', ')}`,
-            )
-            return false
+            // Illegal moves just snap back. A legal but wrong move stays on the board,
+            // outlined in red, then is taken back; the real game state is never touched.
+            const wrongFen = fenAfterAttempt(game, from, to)
+            if (!wrongFen) return false
+
+            showingWrongMoveRef.current = true
+            setSelectedSquare(null)
+            setOptionSquares({})
+            setWrongSquare(to)
+            setFen(wrongFen)
+            const runId = runIdRef.current
+            void (async () => {
+                await wait(WRONG_MOVE_DISPLAY_MS)
+                if (runId !== runIdRef.current) return
+                showingWrongMoveRef.current = false
+                setWrongSquare(null)
+                setFen(gameRef.current.fen())
+            })()
+            return true
         }
 
         const move = applyUserMove(game, from, to, match)
@@ -440,6 +501,7 @@ export function TrainerChessboard({
         }
 
         setSelectedSquare(null)
+        setHintSquare(null)
         setFen(game.fen())
         setLastMoveSquares({ from: move.from, to: move.to })
         const runId = runIdRef.current
@@ -490,6 +552,7 @@ export function TrainerChessboard({
     }, [attemptPlayerMove])
 
     const onSquareClick = useCallback(({ piece, square }: SquareHandlerArgs) => {
+        if (showingWrongMoveRef.current) return
         if (!selectedSquare) {
             if (piece?.pieceType[0] === playerSide) {
                 const hasMoves = getMoveOptions(square as Square)
@@ -516,19 +579,23 @@ export function TrainerChessboard({
         }
     }, [attemptPlayerMove, playerSide, selectedSquare, getMoveOptions])
 
-    // Combine options highlights, history highlights & selected-square highlight
-    const highlights = {
-        ...optionSquares,
-        ...(lastMoveSquares.from && {
-            [lastMoveSquares.from]: { backgroundColor: "rgba(179, 197, 18, 0.4)" }
-        }),
-        ...(lastMoveSquares.to && {
-            [lastMoveSquares.to]: { backgroundColor: "rgba(179, 197, 18, 0.4)" }
-        }),
-        ...(selectedSquare && {
-            [selectedSquare]: { boxShadow: 'inset 0 0 0 4px rgba(245, 158, 11, 0.75)' }
-        }),
-    };
+    // Combine options highlights, history highlights, then outlines (hint < selection < wrong move).
+    const highlights = withSquareOutlines(
+        {
+            ...optionSquares,
+            ...(lastMoveSquares.from && {
+                [lastMoveSquares.from]: { backgroundColor: "rgba(179, 197, 18, 0.4)" }
+            }),
+            ...(lastMoveSquares.to && {
+                [lastMoveSquares.to]: { backgroundColor: "rgba(179, 197, 18, 0.4)" }
+            }),
+        },
+        [
+            [hintSquare, HINT_SQUARE_STYLE],
+            [selectedSquare, SELECTED_SQUARE_STYLE],
+            [wrongSquare, WRONG_SQUARE_STYLE],
+        ],
+    )
 
     return (
         <Chessboard
@@ -585,12 +652,91 @@ function modeHasPracticeRemaining(
     return false
 }
 
-export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
+// Fixed slider range, so the track renders correctly before the repertoires have loaded.
+const MIN_TRAINING_DEPTH = 3
+const MAX_TRAINING_DEPTH = 20
+
+/** CSS `left` for a point at `percent` along a range input, matching where its 1rem thumb centers. */
+function rangeThumbLeft(percent: number): string {
+    return `calc(${percent}% + ${0.5 - percent / 100}rem)`
+}
+
+function DepthSlider({
+    value,
+    min,
+    max,
+    onDraftChange,
+    onCommit,
+}: {
+    value: number
+    min: number
+    max: number
+    /** Every step while dragging (updates the display only). */
+    onDraftChange: (value: number) => void
+    /** The value the slider was released on. */
+    onCommit: (value: number) => void
+}) {
+    const span = Math.max(1, max - min)
+    const percentFor = (v: number) => ((v - min) / span) * 100
+    const ticks = Array.from({ length: max - min + 1 }, (_, i) => min + i)
+
+    // React's onChange fires on every input step; the native `change` event fires only when the
+    // thumb is released (or on each keyboard step), which is when the depth should actually apply.
+    const inputRef = useRef<HTMLInputElement>(null)
+    const onCommitRef = useRef(onCommit)
+    onCommitRef.current = onCommit
+    useEffect(() => {
+        const input = inputRef.current
+        if (!input) return
+        const commit = () => onCommitRef.current(Number(input.value))
+        input.addEventListener('change', commit)
+        return () => input.removeEventListener('change', commit)
+    }, [])
+
+    return (
+        <div>
+            <div className="relative h-8">
+                <div className="absolute top-1/2 h-1.5 w-full -translate-y-1/2 rounded-full bg-slate-700" />
+                <div
+                    className="absolute left-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-amber-500/70"
+                    style={{ width: rangeThumbLeft(percentFor(value)) }}
+                />
+                {ticks.map((tick) => (
+                    <span
+                        key={tick}
+                        className={`absolute top-1/2 h-1 w-1 -translate-x-1/2 translate-y-2 rounded-full ${tick <= value ? 'bg-amber-400/70' : 'bg-slate-600'}`}
+                        style={{ left: rangeThumbLeft(percentFor(tick)) }}
+                    />
+                ))}
+                <input
+                    ref={inputRef}
+                    type="range"
+                    min={min}
+                    max={max}
+                    step={1}
+                    value={value}
+                    onChange={(event) => onDraftChange(Number(event.target.value))}
+                    className="rating-slider-thumb absolute inset-0 z-10 w-full cursor-pointer appearance-none bg-transparent"
+                    // The shared thumb class disables track clicks (for the dual slider); a single slider wants them.
+                    style={{ pointerEvents: 'auto' }}
+                    aria-label="Training depth"
+                />
+            </div>
+        </div>
+    )
+}
+
+type OpeningsPageProps = {
+    settings: AppSettings
+    onSettingsChange: (patch: Partial<AppSettings>) => void
+}
+
+export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) {
     const [paths, setPaths] = useState<GraymatterPaths | null>(null)
     const [whiteRepertoire, setWhiteRepertoire] = useState<ParsedRepertoire | null>(null)
     const [blackRepertoire, setBlackRepertoire] = useState<ParsedRepertoire | null>(null)
     const [parseError, setParseError] = useState<string | null>(null)
-    const [trainMode, setTrainMode] = useState<TrainMode>('both')
+    const trainMode = settings.openingsTrainMode
     const [activeSide, setActiveSide] = useState<Side>('w')
     const [targetPath, setTargetPath] = useState<string[] | null>(null)
     const [status, setStatus] = useState('Loading repertoires…')
@@ -599,19 +745,37 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
     const [trainingRevision, setTrainingRevision] = useState(0)
     const [ready, setReady] = useState(false)
     const [linesFinished, setLinesFinished] = useState(0)
+    const [hintTrigger, setHintTrigger] = useState(0)
     // needsPractice flags are mutated in place on the trie; bump this to re-render the lines-left count.
     const [, setProgressTick] = useState(0)
+
+    const trainingDepth = Math.min(
+        MAX_TRAINING_DEPTH,
+        Math.max(MIN_TRAINING_DEPTH, settings.trainingDepth),
+    )
+
+    // Dragging the slider only moves this draft; the depth is saved when the thumb is released.
+    const [depthDraft, setDepthDraft] = useState(trainingDepth)
+    useEffect(() => {
+        setDepthDraft(trainingDepth)
+    }, [trainingDepth])
+    const commitDepth = (value: number) => {
+        if (value !== trainingDepth) onSettingsChange({ trainingDepth: value })
+    }
 
     const whiteRef = useRef<ParsedRepertoire | null>(null)
     const blackRef = useRef<ParsedRepertoire | null>(null)
     const pathsRef = useRef<GraymatterPaths | null>(null)
     const targetPathRef = useRef<string[] | null>(null)
+    const trainingDepthRef = useRef(trainingDepth)
+    const historySansRef = useRef<string[]>([])
     const saveChainRef = useRef(Promise.resolve())
 
     whiteRef.current = whiteRepertoire
     blackRef.current = blackRepertoire
     pathsRef.current = paths
     targetPathRef.current = targetPath
+    trainingDepthRef.current = trainingDepth
 
     const activeRepertoire =
         activeSide === 'w' ? whiteRepertoire : blackRepertoire
@@ -658,6 +822,9 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
         black: ParsedRepertoire | null,
         opts?: { resetSession?: boolean },
     ) => {
+        // Read depth from a ref so this callback stays stable: a depth change must not restart
+        // the lesson by itself (see the depth-change effect below).
+        const trainingDepth = trainingDepthRef.current
         const side = pickActiveSide(mode, white, black, trainingDepth)
         if (!side) return
 
@@ -681,16 +848,52 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
         setTargetPath(path)
         if (opts?.resetSession) setSessionResetKey((key) => key + 1)
         setLessonKey((key) => key + 1)
-    }, [trainingDepth])
+    }, [])
 
     const onLessonComplete = useCallback(() => {
         if (targetPathRef.current) setLinesFinished((count) => count + 1)
         beginLesson(trainMode, whiteRef.current, blackRef.current)
     }, [beginLesson, trainMode])
 
+    // Start a fresh line once repertoires are ready, and again whenever the mode changes.
+    useEffect(() => {
+        if (!ready) return
+        beginLesson(trainMode, whiteRef.current, blackRef.current, { resetSession: true })
+    }, [beginLesson, ready, trainMode])
+
+    // On a depth change, keep the current position unless the trainee has already made as many
+    // moves as the new depth allows; then start a new line.
+    const appliedDepthRef = useRef<number | null>(null)
+    useEffect(() => {
+        if (!ready) return
+        if (appliedDepthRef.current === null || appliedDepthRef.current === trainingDepth) {
+            // First lesson is started by the effect above.
+            appliedDepthRef.current = trainingDepth
+            return
+        }
+        appliedDepthRef.current = trainingDepth
+
+        const rep = activeSide === 'w' ? whiteRef.current : blackRef.current
+        const current = targetPathRef.current
+        const history = historySansRef.current
+        if (!rep || !current || countPlayerMoves(history, activeSide) >= trainingDepth) {
+            beginLesson(trainMode, whiteRef.current, blackRef.current)
+            return
+        }
+
+        // Continue along a practice line at the new depth that passes through this position. If
+        // none does, nothing is left to practice here at this depth, so move on to a new line.
+        const continuing = collectPracticeTerminalPaths(rep.root, activeSide, trainingDepth)
+            .filter((path) => history.every((san, i) => path[i] === san))
+        if (!continuing.length) {
+            beginLesson(trainMode, whiteRef.current, blackRef.current)
+            return
+        }
+        setTargetPath(continuing[Math.floor(Math.random() * continuing.length)]!)
+    }, [activeSide, beginLesson, ready, trainMode, trainingDepth])
+
     const onTrainModeChange = (mode: TrainMode) => {
-        setTrainMode(mode)
-        beginLesson(mode, whiteRef.current, blackRef.current, { resetSession: true })
+        onSettingsChange({ openingsTrainMode: mode })
     }
 
     const resetTrainingProgress = () => {
@@ -759,7 +962,6 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
                 logRepertoireTreeDfs(whiteParsed.root)
                 logRepertoireTreeDfs(blackParsed.root)
                 setReady(true)
-                beginLesson('both', whiteParsed, blackParsed)
             }
             catch (err) {
                 if (cancelled) return
@@ -771,66 +973,92 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
         return () => {
             cancelled = true
         }
-    }, [beginLesson])
+    }, [])
 
     return (
         <div className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-10 md:flex-row md:items-start">
             <section className="flex-1 space-y-5">
                 <header>
                     <p className="mt-2 text-sm leading-relaxed text-slate-400">
-                        White and black repertoires load automatically from Google Drive (My Drive/Tom/Chess/GrayMatter).
+                        White and black repertoires load automatically from Google Drive.
                         Progress is saved to TrainingStatus.json after each practiced move. Choose
-                        Train Both to alternate randomly between the two books, or lock training to
+                        Both to alternate randomly between the two books, or lock training to
                         one side. Only lines with unpracticed moves for your side are selected.
-                    </p>
-                    <p className="mt-2 font-mono text-xs text-slate-500">
-                        Version {APP_VERSION}
                     </p>
                 </header>
 
-                <fieldset className="space-y-2 rounded-xl border border-slate-700/80 bg-slate-900/50 p-4">
-                    <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Train
-                    </legend>
-                    <div className="flex flex-wrap gap-4">
-                        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
-                            <input
-                                type="radio"
-                                name="train"
-                                checked={trainMode === 'both'}
-                                onChange={() => onTrainModeChange('both')}
-                                className="accent-amber-500"
+                <div className="space-y-3 rounded-xl border border-slate-700/80 bg-slate-900/50 p-4">
+                    <fieldset className="space-y-2">
+                        <legend className="text-sm font-medium text-slate-200">Repertoire</legend>
+                        <div className="space-y-2 pl-4">
+                            <div className="flex flex-wrap gap-4">
+                                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
+                                    <input
+                                        type="radio"
+                                        name="train"
+                                        checked={trainMode === 'both'}
+                                        onChange={() => onTrainModeChange('both')}
+                                        className="accent-amber-500"
+                                    />
+                                    Both
+                                </label>
+                                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
+                                    <input
+                                        type="radio"
+                                        name="train"
+                                        checked={trainMode === 'white'}
+                                        onChange={() => onTrainModeChange('white')}
+                                        className="accent-amber-500"
+                                    />
+                                    White
+                                </label>
+                                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
+                                    <input
+                                        type="radio"
+                                        name="train"
+                                        checked={trainMode === 'black'}
+                                        onChange={() => onTrainModeChange('black')}
+                                        className="accent-amber-500"
+                                    />
+                                    Black
+                                </label>
+                            </div>
+                            <p className="text-xs text-slate-500">
+                                Which opening repertoire to train.
+                            </p>
+                        </div>
+                    </fieldset>
+                    <div className="space-y-1 border-t border-slate-700/60 pt-3">
+                        <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium text-slate-200">Training depth</span>
+                            <span className="rounded-md bg-amber-500/15 px-2 py-0.5 font-mono text-sm text-amber-200">
+                                {depthDraft} moves
+                            </span>
+                        </div>
+                        <div className="pl-4">
+                            <DepthSlider
+                                value={depthDraft}
+                                min={MIN_TRAINING_DEPTH}
+                                max={MAX_TRAINING_DEPTH}
+                                onDraftChange={setDepthDraft}
+                                onCommit={commitDepth}
                             />
-                            Both
-                        </label>
-                        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
-                            <input
-                                type="radio"
-                                name="train"
-                                checked={trainMode === 'white'}
-                                onChange={() => onTrainModeChange('white')}
-                                className="accent-amber-500"
-                            />
-                            White
-                        </label>
-                        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
-                            <input
-                                type="radio"
-                                name="train"
-                                checked={trainMode === 'black'}
-                                onChange={() => onTrainModeChange('black')}
-                                className="accent-amber-500"
-                            />
-                            Black
-                        </label>
+                            <p className="mt-1 text-xs text-slate-500">
+                                How many of your moves to train on each line before moving to the next.
+                            </p>
+                        </div>
                     </div>
-                    <p className="text-xs text-slate-500">
-                        Both picks the next unpracticed line at random from either repertoire. White
-                        and Black only train that side&apos;s book.
-                    </p>
-                </fieldset>
+                </div>
 
                 <div className="flex flex-wrap gap-2">
+                    <button
+                        type="button"
+                        onClick={() => setHintTrigger((trigger) => trigger + 1)}
+                        disabled={!ready || !targetPath}
+                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-emerald-500/60 enabled:hover:text-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                        Hint
+                    </button>
                     <button
                         type="button"
                         onClick={resetTrainingProgress}
@@ -846,26 +1074,27 @@ export function OpeningsPage({ trainingDepth }: { trainingDepth: number }) {
                         {parseError}
                     </p>
                 )}
-
-                <p className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-300">
-                    {status}
-                </p>
             </section>
 
-            <div className="board-panel w-full max-w-[min(100%,28rem)] shrink-0 self-center md:self-start">
-                <TrainerChessboard
-                    root={ready ? (activeRepertoire?.root ?? null) : null}
-                    progressText={progressText}
-                    playerSide={activeSide}
-                    targetPath={targetPath}
-                    trainingDepth={trainingDepth}
-                    sessionResetKey={sessionResetKey}
-                    lessonKey={lessonKey}
-                    trainingRevision={trainingRevision}
-                    onStatusChange={onStatusChange}
-                    onLessonComplete={onLessonComplete}
-                    onTrainingChanged={onTrainingChanged}
-                />
+            <div className="w-full max-w-[min(100%,28rem)] shrink-0 space-y-2 self-center md:self-start">
+                <div className="board-panel">
+                    <TrainerChessboard
+                        root={ready ? (activeRepertoire?.root ?? null) : null}
+                        progressText={progressText}
+                        playerSide={activeSide}
+                        targetPath={targetPath}
+                        trainingDepth={trainingDepth}
+                        sessionResetKey={sessionResetKey}
+                        lessonKey={lessonKey}
+                        trainingRevision={trainingRevision}
+                        hintTrigger={hintTrigger}
+                        historySansRef={historySansRef}
+                        onStatusChange={onStatusChange}
+                        onLessonComplete={onLessonComplete}
+                        onTrainingChanged={onTrainingChanged}
+                    />
+                </div>
+                <p className="font-mono text-xs text-slate-500">{status}</p>
             </div>
         </div>
     )
