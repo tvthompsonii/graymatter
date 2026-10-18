@@ -7,4 +7,6 @@ contextBridge.exposeInMainWorld('graymatter', {
     writeTextFile: (filePath, contents) =>
         ipcRenderer.invoke('graymatter:writeTextFile', filePath, contents),
     fetchNextPuzzle: (filters) => ipcRenderer.invoke('graymatter:fetchNextPuzzle', filters),
+    advancePuzzleCursor: (cursor) => ipcRenderer.invoke('graymatter:advancePuzzleCursor', cursor),
+    fetchSurvivalSet: (request) => ipcRenderer.invoke('graymatter:fetchSurvivalSet', request),
 })

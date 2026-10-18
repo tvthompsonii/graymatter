@@ -138,15 +138,12 @@ async function* readLinesFrom(filePath, start) {
 }
 
 /**
- * Stream the CSV from byte offset `afterOffset` and return the first matching puzzle
- * whose line starts before `untilOffset`. The returned `nextByteOffset` is where the
- * line after the match begins, so the next call can resume there without rereading.
+ * Stream the CSV from byte offset `afterOffset` and yield { puzzle, end } for each parsed
+ * row whose line starts before `untilOffset`, where `end` is the byte offset of the line
+ * after it (so a later scan can resume there without rereading).
  * An offset of 0 (or one past the end of the file) starts at the first data row.
  */
-async function findNextPuzzleFromCsv(filePath, afterOffset, filters, untilOffset = Infinity) {
-    const lo = Math.min(filters.minRating, filters.maxRating)
-    const hi = Math.max(filters.minRating, filters.maxRating)
-    const themeSet = new Set(filters.themes ?? [])
+async function* scanPuzzles(filePath, afterOffset, untilOffset = Infinity) {
     const stopAt = Number.isFinite(untilOffset) ? untilOffset : Infinity
 
     const { indices, dataStart } = await readCsvHeader(filePath)
@@ -170,12 +167,81 @@ async function findNextPuzzleFromCsv(filePath, afterOffset, filters, untilOffset
         if (!trimmed) continue
 
         const puzzle = parsePuzzleRow(parseCsvLine(trimmed), indices)
-        if (puzzle && puzzleMatchesFilters(puzzle, lo, hi, themeSet)) {
-            return { ...puzzle, nextByteOffset: line.end }
+        if (puzzle) yield { puzzle, end: line.end }
+    }
+}
+
+/**
+ * Return the first puzzle matching `filters` scanning from `afterOffset` up to `untilOffset`,
+ * with `nextByteOffset` set to where the line after the match begins.
+ */
+async function findNextPuzzleFromCsv(filePath, afterOffset, filters, untilOffset = Infinity) {
+    const lo = Math.min(filters.minRating, filters.maxRating)
+    const hi = Math.max(filters.minRating, filters.maxRating)
+    const themeSet = new Set(filters.themes ?? [])
+
+    for await (const { puzzle, end } of scanPuzzles(filePath, afterOffset, untilOffset)) {
+        if (puzzleMatchesFilters(puzzle, lo, hi, themeSet)) {
+            return { ...puzzle, nextByteOffset: end }
         }
     }
 
     return null
+}
+
+/**
+ * Collect a Survival run's puzzle set in one pass from `startOffset` (wrapping to the first
+ * data row and stopping back at `startOffset`). Each bucket { rating, count } takes up to
+ * `count` puzzles rated within `radius` of `rating`; a puzzle goes to the nearest bucket by
+ * center that still has room (ties go to the lower bucket). The scan stops once every bucket
+ * is full and reports `nextByteOffset` just past the line that filled the last one; if a full
+ * lap can't fill them all, `nextByteOffset` is null (the lap ended back at the cursor).
+ * Puzzles are returned sorted by rating ascending.
+ */
+async function collectSurvivalSet(filePath, startOffset, { buckets, radius, themes }) {
+    const themeSet = new Set(themes ?? [])
+    const slots = buckets
+        .filter((bucket) => bucket.count > 0)
+        .map((bucket) => ({ rating: bucket.rating, count: bucket.count, puzzles: [] }))
+    const lo = Math.min(...slots.map((slot) => slot.rating)) - radius
+    const hi = Math.max(...slots.map((slot) => slot.rating)) + radius
+    const seenIds = new Set()
+
+    const sortedPuzzles = () => slots
+        .flatMap((slot) => slot.puzzles)
+        .sort((a, b) => a.rating - b.rating)
+
+    const place = (puzzle) => {
+        const open = slots
+            .filter((slot) => slot.puzzles.length < slot.count
+                && Math.abs(puzzle.rating - slot.rating) <= radius)
+            .sort((a, b) => Math.abs(puzzle.rating - a.rating) - Math.abs(puzzle.rating - b.rating)
+                || a.rating - b.rating)
+        if (!open.length) return false
+        open[0].puzzles.push(puzzle)
+        return true
+    }
+
+    if (!slots.length) return { puzzles: [], nextByteOffset: null, lastPuzzleId: null }
+
+    const passes = [[startOffset, Infinity]]
+    if (startOffset > 0) passes.push([0, startOffset])
+
+    for (const [from, until] of passes) {
+        for await (const { puzzle, end } of scanPuzzles(filePath, from, until)) {
+            // An out-of-range saved offset makes the first pass cover the whole file, so the
+            // wrap pass could see the same rows again.
+            if (seenIds.has(puzzle.id)) continue
+            seenIds.add(puzzle.id)
+            if (!puzzleMatchesFilters(puzzle, lo, hi, themeSet)) continue
+            if (!place(puzzle)) continue
+            if (slots.every((slot) => slot.puzzles.length >= slot.count)) {
+                return { puzzles: sortedPuzzles(), nextByteOffset: end, lastPuzzleId: puzzle.id }
+            }
+        }
+    }
+
+    return { puzzles: sortedPuzzles(), nextByteOffset: null, lastPuzzleId: null }
 }
 
 const DEFAULT_PUZZLE_STATUS = {
@@ -214,6 +280,7 @@ async function writePuzzleStatus(statusPath, status) {
 }
 
 module.exports = {
+    collectSurvivalSet,
     findNextPuzzleFromCsv,
     readPuzzleStatus,
     writePuzzleStatus,

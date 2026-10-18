@@ -2,6 +2,8 @@ import { PUZZLE_THEME_OPTIONS, type PuzzleThemeId } from './puzzleCsv'
 
 export type TrainMode = 'both' | 'white' | 'black'
 
+export type PuzzleMode = 'practice' | 'survival'
+
 /** Bounds of the puzzle rating slider (the Lichess puzzle DB spans roughly 400-3300). */
 export const PUZZLE_RATING_MIN = 300
 export const PUZZLE_RATING_MAX = 3400
@@ -12,6 +14,9 @@ export type AppSettings = {
     puzzleThemes: PuzzleThemeId[]
     puzzleRatingMin: number
     puzzleRatingMax: number
+    puzzleMode: PuzzleMode
+    /** Highest Survival score so far. */
+    puzzleSurvivalBest: number
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -20,9 +25,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
     puzzleThemes: [],
     puzzleRatingMin: 1700,
     puzzleRatingMax: 1900,
+    puzzleMode: 'practice',
+    puzzleSurvivalBest: 0,
 }
 
 const TRAIN_MODES: readonly TrainMode[] = ['both', 'white', 'black']
+const PUZZLE_MODES: readonly PuzzleMode[] = ['practice', 'survival']
 const PUZZLE_THEME_IDS: readonly string[] = PUZZLE_THEME_OPTIONS.map((option) => option.id)
 
 function parseRating(value: unknown, fallback: number): number {
@@ -51,6 +59,13 @@ export function parseSettingsJson(text: string): AppSettings | { error: string }
             : DEFAULT_SETTINGS.puzzleThemes
         const ratingA = parseRating(o.puzzleRatingMin, DEFAULT_SETTINGS.puzzleRatingMin)
         const ratingB = parseRating(o.puzzleRatingMax, DEFAULT_SETTINGS.puzzleRatingMax)
+        const puzzleMode = PUZZLE_MODES.includes(o.puzzleMode as PuzzleMode)
+            ? o.puzzleMode as PuzzleMode
+            : DEFAULT_SETTINGS.puzzleMode
+        const best = Number(o.puzzleSurvivalBest)
+        const puzzleSurvivalBest = Number.isInteger(best) && best >= 0
+            ? best
+            : DEFAULT_SETTINGS.puzzleSurvivalBest
 
         return {
             trainingDepth,
@@ -58,6 +73,8 @@ export function parseSettingsJson(text: string): AppSettings | { error: string }
             puzzleThemes,
             puzzleRatingMin: Math.min(ratingA, ratingB),
             puzzleRatingMax: Math.max(ratingA, ratingB),
+            puzzleMode,
+            puzzleSurvivalBest,
         }
     }
     catch {

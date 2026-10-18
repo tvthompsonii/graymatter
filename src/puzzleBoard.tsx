@@ -86,6 +86,12 @@ type PuzzleChessboardProps = {
     hintTrigger?: number
     playSolutionTrigger?: number
     onPlaySolutionComplete?: (success: boolean) => void
+    /**
+     * When set, a wrong move ends the puzzle: it stays on the board outlined in red, the board
+     * locks, and this is called right away. Without it the move is taken back and the trainee
+     * can keep trying.
+     */
+    onMiss?: () => void
 }
 
 export function PuzzleChessboard({
@@ -94,6 +100,7 @@ export function PuzzleChessboard({
     hintTrigger = 0,
     playSolutionTrigger = 0,
     onPlaySolutionComplete,
+    onMiss,
 }: PuzzleChessboardProps) {
     const playerColor = playerColorForPuzzle(puzzle)
     const gameRef = useRef(new Chess())
@@ -104,6 +111,8 @@ export function PuzzleChessboard({
     onSolvedRef.current = onSolved
     const onPlaySolutionCompleteRef = useRef(onPlaySolutionComplete)
     onPlaySolutionCompleteRef.current = onPlaySolutionComplete
+    const onMissRef = useRef(onMiss)
+    onMissRef.current = onMiss
 
     const [fen, setFen] = useState(() => new Chess().fen())
     const [boardKey, setBoardKey] = useState(0)
@@ -304,6 +313,17 @@ export function PuzzleChessboard({
 
         const isCorrect = expectedUci ? uciMatchesMove(expectedUci, move) : false
         const isMate = game.isCheckmate()
+
+        if (!isCorrect && !isMate && onMissRef.current) {
+            // The puzzle is over: leave the wrong move on the board, outlined in red, and lock it.
+            clearSelection()
+            clearHint()
+            setWrongSquare(targetSquare)
+            syncBoard(game, { from: move.from, to: move.to })
+            busyRef.current = true
+            onMissRef.current()
+            return true
+        }
 
         if (!isCorrect && !isMate) {
             // Leave the wrong move on the board, outlined in red, then take it back. The game

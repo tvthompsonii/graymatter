@@ -1,7 +1,12 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron')
 const fs = require('fs')
 const path = require('path')
-const { findNextPuzzleFromCsv, readPuzzleStatus, writePuzzleStatus } = require('./puzzleStream.cjs')
+const {
+    collectSurvivalSet,
+    findNextPuzzleFromCsv,
+    readPuzzleStatus,
+    writePuzzleStatus,
+} = require('./puzzleStream.cjs')
 
 const isDev = !app.isPackaged
 
@@ -46,16 +51,33 @@ ipcMain.handle('graymatter:fetchNextPuzzle', async (_event, filters) => {
         )
     }
 
+    // The cursor is left alone: the same puzzle comes back (across mode switches and restarts)
+    // until the renderer reports it solved or skipped through advancePuzzleCursor.
     if (puzzle) {
-        await writePuzzleStatus(PATHS.puzzleStatus, {
-            nextByteOffset: puzzle.nextByteOffset,
-            lastPuzzleId: puzzle.id,
-        })
-        const { nextByteOffset: _offset, ...payload } = puzzle
-        return { puzzle: payload }
+        const { nextByteOffset, ...payload } = puzzle
+        return { puzzle: payload, nextByteOffset }
     }
 
     return { puzzle: null, noMatches: true }
+})
+
+ipcMain.handle('graymatter:advancePuzzleCursor', async (_event, { nextByteOffset, lastPuzzleId }) => {
+    await writePuzzleStatus(PATHS.puzzleStatus, { nextByteOffset, lastPuzzleId })
+})
+
+ipcMain.handle('graymatter:fetchSurvivalSet', async (_event, request) => {
+    const status = await readPuzzleStatus(PATHS.puzzleStatus)
+    const result = await collectSurvivalSet(PATHS.puzzlesCsv, status.nextByteOffset, request)
+
+    // Advance the shared cursor past everything scanned, so Practice also serves new puzzles.
+    if (result.nextByteOffset !== null) {
+        await writePuzzleStatus(PATHS.puzzleStatus, {
+            nextByteOffset: result.nextByteOffset,
+            lastPuzzleId: result.lastPuzzleId,
+        })
+    }
+
+    return { puzzles: result.puzzles }
 })
 
 function createWindow() {
