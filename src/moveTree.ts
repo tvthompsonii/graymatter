@@ -81,6 +81,25 @@ export function applySan(game: Chess, san: string): boolean {
 
 // Intersects repertoire edges with chess.js legals so we never suggest an illegal book move at this FEN.
 // Arguments: game — current position; node — trie node matching that position’s SAN prefix.
+/** SAN without check/mate suffixes, so a played "Nf3+" matches a book "Nf3". */
+export function normalizeSan(san: string): string {
+    return san.replace(/[+#]+$/, '').trim()
+}
+
+/** The book SAN among `allowedSans` that matches a played SAN (ignoring +/#), or null when off book. */
+export function repertoireSanForPlayed(
+    allowedSans: readonly string[],
+    playedSan: string,
+): string | null {
+    const normalized = normalizeSan(playedSan)
+    return allowedSans.find((san) => normalizeSan(san) === normalized) ?? null
+}
+
+/** "1. e4", "e5", "2. Nf3", … from SAN moves, numbering each White move (lines start at move 1). */
+export function formatLine(sans: readonly string[]): string[] {
+    return sans.map((san, ply) => (ply % 2 === 0 ? `${ply / 2 + 1}. ${san}` : san))
+}
+
 export function legalChildSans(game: Chess, node: Node): string[] {
     const legal = new Set(game.moves({ verbose: false }))
     const out: string[] = []
@@ -158,6 +177,24 @@ export function collectPracticeTerminalPaths(
     playerSide: 'w' | 'b',
     trainingDepth: number,
 ): string[][] {
+    return collectTerminalPaths(root, playerSide, trainingDepth, true)
+}
+
+/** Every drill path at trainingDepth, practiced or not (the total that lines left counts down from). */
+export function collectAllTerminalPaths(
+    root: Node,
+    playerSide: 'w' | 'b',
+    trainingDepth: number,
+): string[][] {
+    return collectTerminalPaths(root, playerSide, trainingDepth, false)
+}
+
+function collectTerminalPaths(
+    root: Node,
+    playerSide: 'w' | 'b',
+    trainingDepth: number,
+    onlyNeedingPractice: boolean,
+): string[][] {
     const depth = Math.max(1, trainingDepth)
     const byKey = new Map<string, string[]>()
 
@@ -169,7 +206,7 @@ export function collectPracticeTerminalPaths(
     ): void {
         const reachedDepth = playerMoveCount >= depth
         if (n.children.size === 0 || reachedDepth) {
-            if (pathSans.length > 0 && anyPlayerNeeds) {
+            if (pathSans.length > 0 && (anyPlayerNeeds || !onlyNeedingPractice)) {
                 const truncated = truncatePathToTrainingDepth(pathSans, playerSide, depth)
                 byKey.set(canonicalPathKey(truncated), truncated)
             }

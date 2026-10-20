@@ -1,10 +1,10 @@
 import { Chess } from 'chess.js'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Chessboard } from 'react-chessboard'
 
 import { boardChrome, customPieces } from './boardTheme'
 import type { PuzzleCursor } from './graymatter'
-import { PuzzleChessboard } from './puzzleBoard'
+import { playerColorForPuzzle, PuzzleChessboard } from './puzzleBoard'
 import {
     PUZZLE_THEME_OPTIONS,
     type Puzzle,
@@ -22,83 +22,52 @@ import {
     type AppSettings,
     type PuzzleMode,
 } from './settings'
+import { Button, Chip, DualRangeSlider, SegmentedControl, ValueBadge } from './ui/controls'
+import {
+    ExternalLinkIcon,
+    LightbulbIcon,
+    LockIcon,
+    PlayIcon,
+    ResetIcon,
+    SkipIcon,
+    XIcon,
+} from './ui/icons'
+import {
+    BoardPage,
+    Card,
+    ErrorNote,
+    PanelHeader,
+    ProgressBar,
+    Section,
+    SideMarker,
+    StatusBanner,
+    StrikeMarker,
+} from './ui/layout'
 
 type SurvivalPhase = 'idle' | 'collecting' | 'playing' | 'over'
 
 const START_FEN = new Chess().fen()
 
-function DualRatingSlider({
-    minRating,
-    maxRating,
-    onChange,
-    onCommit,
-}: {
-    minRating: number
-    maxRating: number
-    /** Every step while dragging (updates the display only). */
-    onChange: (lo: number, hi: number) => void
-    /** The range once a thumb is released. */
-    onCommit: (lo: number, hi: number) => void
-}) {
-    const lo = Math.min(minRating, maxRating)
-    const hi = Math.max(minRating, maxRating)
+const PUZZLE_MODE_OPTIONS = [
+    { value: 'practice', label: 'Practice' },
+    { value: 'survival', label: 'Survival' },
+] as const satisfies ReadonlyArray<{ value: PuzzleMode; label: string }>
 
-    // The native `change` event fires when a thumb is released (React's onChange fires on every
-    // step), so the range is only saved once the user lets go.
-    const trackRef = useRef<HTMLDivElement>(null)
-    const onCommitRef = useRef(onCommit)
-    onCommitRef.current = onCommit
-    useEffect(() => {
-        const inputs = [...(trackRef.current?.querySelectorAll('input') ?? [])]
-        const commit = () => {
-            const [a, b] = inputs.map((input) => Number(input.value))
-            onCommitRef.current(Math.min(a!, b!), Math.max(a!, b!))
-        }
-        for (const input of inputs) input.addEventListener('change', commit)
-        return () => {
-            for (const input of inputs) input.removeEventListener('change', commit)
-        }
-    }, [])
+/** Lichess theme ids are camelCase ("discoveredAttack"); show them as "Discovered attack". */
+function themeLabel(theme: string): string {
+    const words = theme.replace(/([a-z])([A-Z0-9])/g, '$1 $2').toLowerCase()
+    return words.charAt(0).toUpperCase() + words.slice(1)
+}
 
+/** Status line for the side to move in a loaded puzzle. */
+function toMoveBanner(puzzle: Puzzle): ReactNode {
+    const side = playerColorForPuzzle(puzzle)
     return (
-        <div>
-            <div ref={trackRef} className="relative h-8">
-                <div className="absolute top-1/2 h-1.5 w-full -translate-y-1/2 rounded-full bg-slate-700" />
-                <div
-                    className="absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-amber-500/70"
-                    style={{
-                        left: `${((lo - RATING_MIN) / (RATING_MAX - RATING_MIN)) * 100}%`,
-                        right: `${100 - ((hi - RATING_MIN) / (RATING_MAX - RATING_MIN)) * 100}%`,
-                    }}
-                />
-                <input
-                    type="range"
-                    min={RATING_MIN}
-                    max={RATING_MAX}
-                    step={50}
-                    value={lo}
-                    onChange={(event) => {
-                        const nextLo = Number(event.target.value)
-                        onChange(Math.min(nextLo, hi), hi)
-                    }}
-                    className="rating-slider-thumb absolute inset-0 z-20 w-full cursor-pointer appearance-none bg-transparent"
-                    aria-label="Minimum puzzle rating"
-                />
-                <input
-                    type="range"
-                    min={RATING_MIN}
-                    max={RATING_MAX}
-                    step={50}
-                    value={hi}
-                    onChange={(event) => {
-                        const nextHi = Number(event.target.value)
-                        onChange(lo, Math.max(nextHi, lo))
-                    }}
-                    className="rating-slider-thumb absolute inset-0 z-30 w-full cursor-pointer appearance-none bg-transparent"
-                    aria-label="Maximum puzzle rating"
-                />
-            </div>
-        </div>
+        <StatusBanner
+            title={side === 'w' ? 'White to move' : 'Black to move'}
+            text="Find the best continuation"
+            marker={<SideMarker side={side} />}
+        />
     )
 }
 
@@ -128,7 +97,8 @@ export function PuzzlesPage({ settings, onSettingsChange }: PuzzlesPageProps) {
     const [survivalScore, setSurvivalScore] = useState(0)
     // Puzzles missed this run, in order; after the run each one can be reopened for review.
     const [survivalMissed, setSurvivalMissed] = useState<Puzzle[]>([])
-    const survivalMisses = survivalMissed.length
+    // True while a missed puzzle's wrong move is held on the board, before the next one loads.
+    const [justMissed, setJustMissed] = useState(false)
     // Index into survivalMissed of the puzzle being reviewed after the run, if any.
     const [reviewIndex, setReviewIndex] = useState<number | null>(null)
     // Bumped to cancel a run's pending fetch and miss timer (Restart, mode switch, unmount).
@@ -248,6 +218,7 @@ export function PuzzlesPage({ settings, onSettingsChange }: PuzzlesPageProps) {
         setSurvivalIndex(0)
         setSurvivalScore(0)
         setSurvivalMissed([])
+        setJustMissed(false)
         setReviewIndex(null)
         setSurvivalPhase('collecting')
 
@@ -283,6 +254,7 @@ export function PuzzlesPage({ settings, onSettingsChange }: PuzzlesPageProps) {
     const advanceSurvival = () => {
         const { queue, index } = survivalRef.current
         const next = index + 1
+        setJustMissed(false)
         if (next >= queue.length) {
             setActivePuzzle(null)
             setSurvivalPhase('over')
@@ -305,10 +277,12 @@ export function PuzzlesPage({ settings, onSettingsChange }: PuzzlesPageProps) {
         const { queue, index, missed } = survivalRef.current
         const nextMissed = [...missed, queue[index]!]
         setSurvivalMissed(nextMissed)
+        setJustMissed(true)
         // The board holds the wrong move (outlined in red) until the next puzzle replaces it.
         window.setTimeout(() => {
             if (run !== survivalRunRef.current) return
             if (nextMissed.length >= SURVIVAL_MAX_MISSES) {
+                setJustMissed(false)
                 setActivePuzzle(null)
                 setSurvivalPhase('over')
                 return
@@ -340,6 +314,7 @@ export function PuzzlesPage({ settings, onSettingsChange }: PuzzlesPageProps) {
         setSolutionPlaying(false)
         setActivePuzzle(null)
         setSurvivalPhase('idle')
+        setJustMissed(false)
         setReviewIndex(null)
         onSettingsChange({ puzzleMode: mode })
         if (mode === 'practice') void fetchNextPuzzle()
@@ -382,239 +357,330 @@ export function PuzzlesPage({ settings, onSettingsChange }: PuzzlesPageProps) {
     const survivalOver = survival && survivalPhase === 'over'
     const reviewing = survivalOver && reviewIndex !== null
 
-    const placeholder = loading ? 'Loading next puzzle…' : 'Press Next puzzle to start.'
+    const board = activePuzzle && !loading
+        ? (
+            <PuzzleChessboard
+                key={puzzleKey}
+                puzzle={activePuzzle}
+                hintTrigger={survival ? 0 : hintTrigger}
+                playSolutionTrigger={survival ? 0 : playSolutionTrigger}
+                onPlaySolutionComplete={handlePlaySolutionComplete}
+                onSolved={reviewing
+                    ? handleReviewSolved
+                    : survival ? handleSurvivalSolved : () => void advanceAndFetchNextPuzzle()}
+                onMiss={survival && !reviewing ? handleSurvivalMiss : undefined}
+            />
+        )
+        : survival
+            ? (
+                <Chessboard
+                    options={{
+                        id: 'PuzzlesBoardIdle',
+                        position: START_FEN,
+                        pieces: customPieces,
+                        allowDragging: false,
+                        ...boardChrome,
+                    }}
+                />
+            )
+            : (
+                <div className="flex aspect-square items-center justify-center bg-panel px-6 text-center text-sm text-dim">
+                    {loading ? 'Loading next puzzle…' : 'Press Next puzzle to start.'}
+                </div>
+            )
 
-    // Before a run the prompt lives in the description; the board shows the start position.
-    let survivalPrompt = ''
-    if (survivalPhase === 'idle') survivalPrompt = ' Press Start run to begin.'
-    else if (survivalPhase === 'collecting') survivalPrompt = ' Finding puzzles…'
-
-    let survivalResult: string | null = null
-    if (survivalOver) {
-        survivalResult = survivalMisses >= SURVIVAL_MAX_MISSES
-            ? `Game over: score ${survivalScore} (best ${settings.puzzleSurvivalBest}).`
-            : `You cleared all ${survivalQueue.length} puzzles! Score ${survivalScore} `
-                + `(best ${settings.puzzleSurvivalBest}).`
-        if (survivalMisses > 0) survivalResult += ' Click a ✕ to review a missed puzzle.'
-    }
+    const themeChips = (
+        <div className="flex flex-wrap gap-1.5">
+            {PUZZLE_THEME_OPTIONS.map(({ id, label }) => (
+                <Chip
+                    key={id}
+                    pressed={selectedThemes.has(id)}
+                    onToggle={() => toggleTheme(id)}
+                    disabled={survivalRunning}
+                >
+                    {label}
+                </Chip>
+            ))}
+        </div>
+    )
 
     return (
-        <div className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-10 md:flex-row md:items-start">
-            <section className="flex-1 space-y-5">
-                <header>
-                    <p className="mt-2 text-sm leading-relaxed text-slate-400">
-                        {survival
-                            ? 'Solve puzzles of rising difficulty from your Lichess database. '
-                                + `Any wrong move is a miss; ${SURVIVAL_MAX_MISSES} misses end the run.`
-                                + survivalPrompt
-                            : 'Choose themes and a rating range, then solve puzzles from the Lichess '
-                                + 'database. The computer plays the setup move; you find the winning '
-                                + 'continuation.'}
-                    </p>
-                </header>
+        <BoardPage label={survival ? 'Survival controls' : 'Puzzle controls'} board={<div className="board-panel">{board}</div>}>
+            <PanelHeader
+                title="Puzzles"
+                subtitle={survival
+                    ? 'Rising difficulty. Three misses ends the run.'
+                    : 'Positions from your Lichess puzzle file.'}
+                info={survival
+                    ? 'Each run collects puzzles from about 800 to 1900 and plays them in rating order. '
+                        + 'Any wrong move is a miss. After a run, click a missed puzzle to review it.'
+                    : 'The computer plays the setup move; you find the winning continuation. Next puzzle '
+                        + 'plays out the solution first. Progress is saved in PuzzleStatus.json.'}
+            />
 
-                <div className="space-y-3 rounded-xl border border-slate-700/80 bg-slate-900/50 p-4">
-                    <fieldset className="space-y-2">
-                        <legend className="text-sm font-medium text-slate-200">Mode</legend>
-                        <div className="flex flex-wrap gap-4 pl-4">
-                            {([['practice', 'Practice'], ['survival', 'Survival']] as const).map(([mode, label]) => (
-                                <label
-                                    key={mode}
-                                    className="flex cursor-pointer items-center gap-2 text-sm text-slate-200"
-                                >
-                                    <input
-                                        type="radio"
-                                        name="puzzle-mode"
-                                        checked={puzzleMode === mode}
-                                        onChange={() => changePuzzleMode(mode)}
-                                        className="accent-amber-500"
-                                    />
-                                    {label}
-                                </label>
-                            ))}
-                        </div>
-                    </fieldset>
-                    <fieldset
-                        disabled={survivalRunning}
-                        className="space-y-2 border-t border-slate-700/60 pt-3 disabled:opacity-50"
-                    >
-                        <div className="text-sm font-medium text-slate-200">Themes</div>
-                        <div className="space-y-2 pl-4">
-                            <div className="flex flex-wrap gap-4">
-                                {PUZZLE_THEME_OPTIONS.map(({ id, label }) => (
-                                    <label
-                                        key={id}
-                                        className="flex cursor-pointer items-center gap-2 text-sm text-slate-200"
-                                    >
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedThemes.has(id)}
-                                            onChange={() => toggleTheme(id)}
-                                            className="accent-amber-500"
-                                        />
-                                        {label}
-                                    </label>
-                                ))}
+            <SegmentedControl
+                label="Puzzle mode"
+                options={PUZZLE_MODE_OPTIONS}
+                value={puzzleMode}
+                onChange={changePuzzleMode}
+            />
+
+            {survival
+                ? (
+                    <SurvivalPanel
+                        phase={survivalPhase}
+                        activePuzzle={activePuzzle}
+                        justMissed={justMissed}
+                        reviewIndex={reviewIndex}
+                        score={survivalScore}
+                        best={settings.puzzleSurvivalBest}
+                        missed={survivalMissed}
+                        queue={survivalQueue}
+                        index={survivalIndex}
+                        themeChips={themeChips}
+                        onReview={reviewMissedPuzzle}
+                    />
+                )
+                : (
+                    <>
+                        {loading
+                            ? <StatusBanner tone="info" title="Loading next puzzle…" />
+                            : solutionPlaying
+                                ? <StatusBanner tone="info" title="Playing the solution" />
+                                : activePuzzle
+                                    ? toMoveBanner(activePuzzle)
+                                    : <StatusBanner tone="info" title="No puzzle loaded" />}
+
+                        <Section label="Themes">
+                            {themeChips}
+                            <span className="text-xs text-faint">None selected = any theme.</span>
+                        </Section>
+
+                        <Section
+                            label="Rating"
+                            aside={<ValueBadge>{Math.min(ratingLo, ratingHi)}–{Math.max(ratingLo, ratingHi)}</ValueBadge>}
+                        >
+                            <DualRangeSlider
+                                min={RATING_MIN}
+                                max={RATING_MAX}
+                                step={50}
+                                low={ratingLo}
+                                high={ratingHi}
+                                onDraft={onRatingChange}
+                                onCommit={onRatingCommit}
+                                labels={['Minimum puzzle rating', 'Maximum puzzle rating']}
+                            />
+                        </Section>
+
+                        {activePuzzle && !loading && <PuzzleCard puzzle={activePuzzle} />}
+                    </>
+                )}
+
+            {loadError && <ErrorNote>{loadError}</ErrorNote>}
+
+            <div className="mt-auto flex gap-2">
+                {survival
+                    ? survivalPhase === 'playing'
+                        ? (
+                            <Button className="flex-1" icon={<ResetIcon />} onClick={() => void startSurvivalRun()}>
+                                Restart run
+                            </Button>
+                        )
+                        : (
+                            <Button
+                                variant="primary"
+                                className="flex-1"
+                                icon={<PlayIcon size={15} />}
+                                onClick={() => void startSurvivalRun()}
+                                disabled={!ready || survivalPhase === 'collecting'}
+                            >
+                                {survivalPhase === 'collecting' ? 'Finding puzzles…' : 'Start run'}
+                            </Button>
+                        )
+                    : (
+                        <>
+                            <Button
+                                className="flex-1"
+                                icon={<LightbulbIcon className="text-success" />}
+                                onClick={() => setHintTrigger((trigger) => trigger + 1)}
+                                disabled={loading || !ready || !activePuzzle || solutionPlaying}
+                            >
+                                Hint
+                            </Button>
+                            <Button
+                                variant="primary"
+                                className="flex-[1.4]"
+                                trailingIcon={<SkipIcon strokeWidth={2.2} />}
+                                onClick={handleNextPuzzle}
+                                disabled={loading || !ready || solutionPlaying}
+                            >
+                                Next puzzle
+                            </Button>
+                        </>
+                    )}
+            </div>
+        </BoardPage>
+    )
+}
+
+function PuzzleCard({ puzzle, label = 'Puzzle rating' }: { puzzle: Puzzle; label?: string }) {
+    const themes = puzzle.themes.slice(0, 2).map(themeLabel)
+    return (
+        <Card className="gap-2">
+            <div className="flex items-baseline justify-between">
+                <span className="text-[13px] text-soft">{label}</span>
+                <span className="font-mono text-xl font-semibold text-ink">{puzzle.rating}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-xs text-muted">
+                <span className="truncate">
+                    {[...themes, `${puzzle.nbPlays.toLocaleString()} plays`].join(' · ')}
+                </span>
+                <a
+                    href={`https://lichess.org/training/${puzzle.id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Open on Lichess"
+                    className="inline-flex shrink-0 items-center gap-1 font-mono text-accent-ink hover:text-amber-200"
+                >
+                    #{puzzle.id}
+                    <ExternalLinkIcon size={12} />
+                </a>
+            </div>
+        </Card>
+    )
+}
+
+type SurvivalPanelProps = {
+    phase: SurvivalPhase
+    activePuzzle: Puzzle | null
+    justMissed: boolean
+    reviewIndex: number | null
+    score: number
+    best: number
+    missed: Puzzle[]
+    queue: Puzzle[]
+    index: number
+    themeChips: ReactNode
+    onReview: (index: number) => void
+}
+
+function SurvivalPanel({
+    phase,
+    activePuzzle,
+    justMissed,
+    reviewIndex,
+    score,
+    best,
+    missed,
+    queue,
+    index,
+    themeChips,
+    onReview,
+}: SurvivalPanelProps) {
+    const running = phase === 'collecting' || phase === 'playing'
+    const reviewing = phase === 'over' && reviewIndex !== null && !!activePuzzle
+
+    let banner: ReactNode
+    if (phase === 'collecting') banner = <StatusBanner tone="info" title="Finding puzzles…" text="Collecting this run's set" />
+    else if (justMissed) banner = <StatusBanner tone="error" title="Wrong move" text="Next puzzle in a moment" />
+    else if (reviewing) banner = <StatusBanner tone="error" title="Review" text="Retry this miss, it will not change your score" />
+    else if (phase === 'playing' && activePuzzle) banner = toMoveBanner(activePuzzle)
+    else if (phase === 'over') {
+        banner = missed.length
+            ? <StatusBanner tone="info" title="Run over" text="Review your misses or start a new run" />
+            : <StatusBanner tone="success" title="Run cleared" text={`You solved all ${queue.length} puzzles`} />
+    }
+    else banner = <StatusBanner tone="info" title="Ready" text="Press Start run to begin" />
+
+    return (
+        <>
+            {banner}
+
+            {phase === 'over'
+                ? (
+                    <Card className="gap-3.5 p-4">
+                        <div className="flex items-end justify-between">
+                            <div className="flex flex-col gap-0.5">
+                                <span className="text-xs text-muted">Game over · final score</span>
+                                <span className="font-mono text-[44px] font-semibold leading-none text-ink">{score}</span>
                             </div>
-                            <p className="text-xs text-slate-500">
-                                Leave all unchecked to include any theme.
-                            </p>
-                        </div>
-                    </fieldset>
-                    {survival ? (
-                        <div className="space-y-2 border-t border-slate-700/60 pt-3">
-                            <div className="flex items-center justify-between">
-                                <span className="text-sm font-medium text-slate-200">Score</span>
-                                <span className="rounded-md bg-amber-500/15 px-2 py-0.5 font-mono text-sm text-amber-200">
-                                    {survivalScore}
-                                </span>
-                            </div>
-                            <div className="space-y-1 pl-4 text-sm text-slate-300">
-                                <div className="flex items-center justify-between">
-                                    <span>Misses</span>
-                                    <span
-                                        className="flex gap-1.5"
-                                        aria-label={`${survivalMisses} of ${SURVIVAL_MAX_MISSES} misses`}
-                                    >
-                                        {Array.from({ length: SURVIVAL_MAX_MISSES }, (_, i) => {
-                                            const missedPuzzle = survivalMissed[i]
-                                            const color = missedPuzzle ? 'text-red-400' : 'text-slate-600'
-                                            if (!survivalOver || !missedPuzzle) {
-                                                return <span key={i} className={color}>✕</span>
-                                            }
-                                            return (
-                                                <button
-                                                    key={i}
-                                                    type="button"
-                                                    onClick={() => reviewMissedPuzzle(i)}
-                                                    title={`Review missed puzzle #${missedPuzzle.id} (rating ${missedPuzzle.rating})`}
-                                                    className={`rounded px-1 transition hover:bg-red-500/20 hover:text-red-200 ${color} ${
-                                                        reviewIndex === i ? 'ring-1 ring-red-400' : ''
-                                                    }`}
-                                                >
-                                                    ✕
-                                                </button>
-                                            )
-                                        })}
-                                    </span>
-                                </div>
-                                <div className="flex items-center justify-between">
-                                    <span>Best</span>
-                                    <span className="font-mono">{settings.puzzleSurvivalBest}</span>
-                                </div>
-                                {survivalQueue.length > 0 && (
-                                    <div className="flex items-center justify-between">
-                                        <span>Puzzle</span>
-                                        <span className="font-mono">
-                                            {survivalIndex + 1} / {survivalQueue.length}
-                                        </span>
-                                    </div>
+                            <div className="text-right text-xs leading-relaxed text-muted">
+                                <div>Best <span className="font-mono text-accent-ink">{best}</span></div>
+                                {queue[index] && (
+                                    <div>Reached <span className="font-mono text-body">{queue[index].rating}</span></div>
                                 )}
                             </div>
                         </div>
-                    ) : (
-                        <div className="space-y-1 border-t border-slate-700/60 pt-3">
-                            <div className="flex items-center justify-between">
-                                <span className="text-sm font-medium text-slate-200">Rating range</span>
-                                <span className="rounded-md bg-amber-500/15 px-2 py-0.5 font-mono text-sm text-amber-200">
-                                    {Math.min(ratingLo, ratingHi)}-{Math.max(ratingLo, ratingHi)}
-                                </span>
+                        {missed.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <span className="text-xs text-muted">Missed puzzles · click to review</span>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {missed.map((puzzle, i) => (
+                                        <button
+                                            key={puzzle.id}
+                                            type="button"
+                                            onClick={() => onReview(i)}
+                                            aria-pressed={reviewIndex === i}
+                                            aria-label={`Review missed puzzle rated ${puzzle.rating}`}
+                                            title={`#${puzzle.id}`}
+                                            className={`flex flex-col items-center gap-1 rounded-[10px] border px-1 py-2.5 transition ${
+                                                reviewIndex === i
+                                                    ? 'border-danger bg-danger/10'
+                                                    : 'border-line-strong bg-panel hover:border-danger/60'
+                                            }`}
+                                        >
+                                            <span className="flex h-[30px] w-[30px] items-center justify-center rounded-full border border-danger bg-danger/20 text-danger">
+                                                <XIcon size={14} strokeWidth={3} />
+                                            </span>
+                                            <span className="font-mono text-[13px] font-semibold text-ink">{puzzle.rating}</span>
+                                            <span className="text-[11px] text-muted">{themeLabel(puzzle.themes[0] ?? 'puzzle')}</span>
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
-                            <div className="pl-4">
-                                <DualRatingSlider
-                                    minRating={ratingLo}
-                                    maxRating={ratingHi}
-                                    onChange={onRatingChange}
-                                    onCommit={onRatingCommit}
-                                />
-                                <p className="mt-1 text-xs text-slate-500">
-                                    Only puzzles rated within this range are served.
-                                </p>
+                        )}
+                    </Card>
+                )
+                : (
+                    <Card row className="items-stretch p-4">
+                        <div className="flex flex-1 flex-col gap-0.5">
+                            <span className="text-xs text-muted">Score</span>
+                            <span className="font-mono text-[44px] font-semibold leading-none text-ink">{score}</span>
+                            <span className="text-xs text-muted">
+                                Best <span className="font-mono text-accent-ink">{best}</span>
+                            </span>
+                        </div>
+                        <div className="flex flex-col items-end justify-between">
+                            <span className="text-xs text-muted">Misses</span>
+                            <div className="flex gap-1.5" aria-label={`${missed.length} of ${SURVIVAL_MAX_MISSES} misses`}>
+                                {Array.from({ length: SURVIVAL_MAX_MISSES }, (_, i) => (
+                                    <StrikeMarker key={i} missed={i < missed.length} />
+                                ))}
                             </div>
                         </div>
-                    )}
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                    {survival ? (
-                        <button
-                            type="button"
-                            onClick={() => void startSurvivalRun()}
-                            disabled={!ready || survivalPhase === 'collecting'}
-                            className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-amber-500/60 enabled:hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                            {survivalPhase === 'playing' ? 'Restart' : 'Start run'}
-                        </button>
-                    ) : (
-                        <>
-                            <button
-                                type="button"
-                                onClick={() => setHintTrigger((trigger) => trigger + 1)}
-                                disabled={loading || !ready || !activePuzzle || solutionPlaying}
-                                className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-emerald-500/60 enabled:hover:text-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                                Hint
-                            </button>
-                            <button
-                                type="button"
-                                onClick={handleNextPuzzle}
-                                disabled={loading || !ready || solutionPlaying}
-                                className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-amber-500/60 enabled:hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                                Next puzzle
-                            </button>
-                        </>
-                    )}
-                </div>
-
-                {loadError && (
-                    <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">
-                        {loadError}
-                    </p>
+                    </Card>
                 )}
-            </section>
 
-            <div className="w-full max-w-[min(100%,28rem)] shrink-0 space-y-2 self-center md:self-start">
-                <div className="board-panel">
-                    {activePuzzle && !loading ? (
-                        <PuzzleChessboard
-                            key={puzzleKey}
-                            puzzle={activePuzzle}
-                            hintTrigger={survival ? 0 : hintTrigger}
-                            playSolutionTrigger={survival ? 0 : playSolutionTrigger}
-                            onPlaySolutionComplete={handlePlaySolutionComplete}
-                            onSolved={reviewing
-                                ? handleReviewSolved
-                                : survival ? handleSurvivalSolved : () => void advanceAndFetchNextPuzzle()}
-                            onMiss={survival && !reviewing ? handleSurvivalMiss : undefined}
-                        />
-                    ) : survival ? (
-                        <Chessboard
-                            options={{
-                                id: 'PuzzlesBoardIdle',
-                                position: START_FEN,
-                                pieces: customPieces,
-                                allowDragging: false,
-                                ...boardChrome,
-                            }}
-                        />
-                    ) : (
-                        <div className="flex aspect-square items-center justify-center rounded-xl bg-slate-900/60 px-6 text-center text-sm text-slate-500">
-                            {placeholder}
-                        </div>
-                    )}
+            {phase === 'playing' && queue.length > 0 && (
+                <div className="flex flex-col gap-2">
+                    <div className="flex justify-between text-xs text-muted">
+                        <span>Puzzle <span className="font-mono text-body">{index + 1} / {queue.length}</span></span>
+                        {queue[index] && <span>Rated <span className="font-mono text-body">{queue[index].rating}</span></span>}
+                    </div>
+                    <ProgressBar label="Run progress" value={index + 1} max={queue.length} />
                 </div>
-                {activePuzzle && !loading && (
-                    <p className="font-mono text-xs text-slate-500">
-                        {reviewing && 'review · '}
-                        puzzle #{activePuzzle.id} · rating {activePuzzle.rating} ·{' '}
-                        {activePuzzle.nbPlays.toLocaleString()} plays
-                    </p>
-                )}
-                {survivalResult && !activePuzzle && (
-                    <p className="text-sm text-slate-300">{survivalResult}</p>
-                )}
-            </div>
-        </div>
+            )}
+
+            <Section
+                label={running
+                    ? <>Themes <LockIcon size={12} /> <span className="font-normal normal-case tracking-normal">locked during a run</span></>
+                    : phase === 'over' ? 'Themes for the next run' : 'Themes'}
+                className={running ? 'opacity-55' : ''}
+            >
+                {themeChips}
+            </Section>
+
+            {reviewing && activePuzzle && <PuzzleCard puzzle={activePuzzle} label="Reviewing" />}
+        </>
     )
 }

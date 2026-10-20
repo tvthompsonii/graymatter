@@ -1,6 +1,6 @@
 import type { Square } from 'chess.js'
 import { Chess, type Move } from 'chess.js'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Chessboard } from 'react-chessboard'
 import type {
     PieceDropHandlerArgs,
@@ -20,18 +20,23 @@ import {
 } from './boardTheme'
 import type { GraymatterPaths } from './graymatter'
 import {
+    collectAllTerminalPaths,
     collectPracticeTerminalPaths,
     countPlayerMoves,
     fenSig,
+    formatLine,
     legalChildSans,
     logRepertoireTreeDfs,
+    normalizeSan,
     pathHasPracticeAhead,
     pickRandomPracticePath,
+    repertoireSanForPlayed,
     resetNeedsPractice,
     treeHasPracticeRemaining,
     walkToNode,
     type Node,
 } from './moveTree'
+import { ExploreView } from './openingExplorer'
 import { parsePgnToRepertoire, type ParsedRepertoire } from './pgnPaths'
 import type { AppSettings, TrainMode } from './settings'
 import {
@@ -39,6 +44,19 @@ import {
     parseTrainingFileJson,
     serializeDualTrainingStatus,
 } from './trainingExport'
+import { Button, RangeSlider, SegmentedControl, ValueBadge } from './ui/controls'
+import { LightbulbIcon, ResetIcon } from './ui/icons'
+import {
+    BoardPage,
+    Card,
+    ErrorNote,
+    PanelHeader,
+    ProgressBar,
+    Section,
+    SideMarker,
+    StatTile,
+    StatusBanner,
+} from './ui/layout'
 
 export type Side = 'w' | 'b'
 
@@ -58,16 +76,14 @@ export type TrainerChessboardProps = {
     /** SAN moves played so far in the current line; owned by the page so a depth change can inspect it. */
     historySansRef: { current: string[] }
     onStatusChange: (status: string) => void
+    /** Called with a copy of historySansRef whenever the position changes. */
+    onHistoryChange?: (sans: string[]) => void
     onLessonComplete: () => void
     onTrainingChanged: () => void
 }
 
 function wait(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-function normalizeSan(san: string): string {
-    return san.replace(/[+#]+$/, '').trim()
 }
 
 /** FEN after playing from→to (trying promotions), or null when the move is illegal. */
@@ -147,14 +163,6 @@ function applyUserMove(
     }
 }
 
-function repertoireSanForPlayed(
-    allowedSans: readonly string[],
-    playedSan: string,
-): string | null {
-    const normalized = normalizeSan(playedSan)
-    return allowedSans.find((san) => normalizeSan(san) === normalized) ?? null
-}
-
 export function TrainerChessboard({
     root,
     progressText,
@@ -167,6 +175,7 @@ export function TrainerChessboard({
     hintTrigger,
     historySansRef,
     onStatusChange,
+    onHistoryChange,
     onLessonComplete,
     onTrainingChanged,
 }: TrainerChessboardProps) {
@@ -193,6 +202,13 @@ export function TrainerChessboard({
     const [wrongSquare, setWrongSquare] = useState<string | null>(null)
     // True while a wrong move is displayed; blocks input until it is taken back.
     const showingWrongMoveRef = useRef(false)
+
+    // Every history change is followed by a position change, so report the line on each new fen.
+    const onHistoryChangeRef = useRef(onHistoryChange)
+    onHistoryChangeRef.current = onHistoryChange
+    useEffect(() => {
+        onHistoryChangeRef.current?.([...historySansRef.current])
+    }, [fen, historySansRef])
 
     const rebuildStatus = useCallback(() => {
         if (!root) {
@@ -656,86 +672,149 @@ function modeHasPracticeRemaining(
 const MIN_TRAINING_DEPTH = 3
 const MAX_TRAINING_DEPTH = 20
 
-/** CSS `left` for a point at `percent` along a range input, matching where its 1rem thumb centers. */
-function rangeThumbLeft(percent: number): string {
-    return `calc(${percent}% + ${0.5 - percent / 100}rem)`
-}
-
-function DepthSlider({
-    value,
-    min,
-    max,
-    onDraftChange,
-    onCommit,
-}: {
-    value: number
-    min: number
-    max: number
-    /** Every step while dragging (updates the display only). */
-    onDraftChange: (value: number) => void
-    /** The value the slider was released on. */
-    onCommit: (value: number) => void
-}) {
-    const span = Math.max(1, max - min)
-    const percentFor = (v: number) => ((v - min) / span) * 100
-    const ticks = Array.from({ length: max - min + 1 }, (_, i) => min + i)
-
-    // React's onChange fires on every input step; the native `change` event fires only when the
-    // thumb is released (or on each keyboard step), which is when the depth should actually apply.
-    const inputRef = useRef<HTMLInputElement>(null)
-    const onCommitRef = useRef(onCommit)
-    onCommitRef.current = onCommit
-    useEffect(() => {
-        const input = inputRef.current
-        if (!input) return
-        const commit = () => onCommitRef.current(Number(input.value))
-        input.addEventListener('change', commit)
-        return () => input.removeEventListener('change', commit)
-    }, [])
-
-    return (
-        <div>
-            <div className="relative h-8">
-                <div className="absolute top-1/2 h-1.5 w-full -translate-y-1/2 rounded-full bg-slate-700" />
-                <div
-                    className="absolute left-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-amber-500/70"
-                    style={{ width: rangeThumbLeft(percentFor(value)) }}
-                />
-                {ticks.map((tick) => (
-                    <span
-                        key={tick}
-                        className={`absolute top-1/2 h-1 w-1 -translate-x-1/2 translate-y-2 rounded-full ${tick <= value ? 'bg-amber-400/70' : 'bg-slate-600'}`}
-                        style={{ left: rangeThumbLeft(percentFor(tick)) }}
-                    />
-                ))}
-                <input
-                    ref={inputRef}
-                    type="range"
-                    min={min}
-                    max={max}
-                    step={1}
-                    value={value}
-                    onChange={(event) => onDraftChange(Number(event.target.value))}
-                    className="rating-slider-thumb absolute inset-0 z-10 w-full cursor-pointer appearance-none bg-transparent"
-                    // The shared thumb class disables track clicks (for the dual slider); a single slider wants them.
-                    style={{ pointerEvents: 'auto' }}
-                    aria-label="Training depth"
-                />
-            </div>
-        </div>
-    )
-}
+const TRAIN_MODE_OPTIONS = [
+    { value: 'both', label: 'Both' },
+    { value: 'white', label: 'White' },
+    { value: 'black', label: 'Black' },
+] as const satisfies ReadonlyArray<{ value: TrainMode; label: string }>
 
 type OpeningsPageProps = {
     settings: AppSettings
     onSettingsChange: (patch: Partial<AppSettings>) => void
 }
 
+type OpeningsView = 'explore' | 'drill'
+
+const VIEW_OPTIONS = [
+    { value: 'explore', label: 'Explore' },
+    { value: 'drill', label: 'Drill' },
+] as const satisfies ReadonlyArray<{ value: OpeningsView; label: string }>
+
+/** Repertoires as loaded once by OpeningsPage and shared by both views. */
+export type LoadedRepertoires = {
+    paths: GraymatterPaths | null
+    whiteRepertoire: ParsedRepertoire | null
+    blackRepertoire: ParsedRepertoire | null
+    /** True once both PGNs are parsed and TrainingStatus.json is overlaid. */
+    ready: boolean
+    loadError: string | null
+}
+
+/**
+ * Loads both repertoires once, then shows Explore (the default every time the tab opens) or
+ * Drill. Each view puts the Explore | Drill switch in its own panel.
+ */
 export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) {
-    const [paths, setPaths] = useState<GraymatterPaths | null>(null)
-    const [whiteRepertoire, setWhiteRepertoire] = useState<ParsedRepertoire | null>(null)
-    const [blackRepertoire, setBlackRepertoire] = useState<ParsedRepertoire | null>(null)
-    const [parseError, setParseError] = useState<string | null>(null)
+    const [view, setView] = useState<OpeningsView>('explore')
+    const [loaded, setLoaded] = useState<LoadedRepertoires>({
+        paths: null,
+        whiteRepertoire: null,
+        blackRepertoire: null,
+        ready: false,
+        loadError: null,
+    })
+
+    useEffect(() => {
+        let cancelled = false
+        const fail = (loadError: string) => {
+            if (!cancelled) setLoaded((prev) => ({ ...prev, loadError }))
+        }
+
+        void (async () => {
+            try {
+                if (!window.graymatter) {
+                    fail('GrayMatter file API is unavailable. Run this app in Electron.')
+                    return
+                }
+
+                const resolvedPaths = await window.graymatter.getPaths()
+                if (cancelled) return
+                setLoaded((prev) => ({ ...prev, paths: resolvedPaths }))
+
+                const [whiteText, blackText] = await Promise.all([
+                    window.graymatter.readTextFile(resolvedPaths.whitePgn),
+                    window.graymatter.readTextFile(resolvedPaths.blackPgn),
+                ])
+                if (cancelled) return
+
+                const whiteParsed = parsePgnToRepertoire(whiteText)
+                const blackParsed = parsePgnToRepertoire(blackText)
+
+                if ('error' in whiteParsed) {
+                    fail(`White PGN: ${whiteParsed.error ?? 'Could not parse.'}`)
+                    return
+                }
+                if ('error' in blackParsed) {
+                    fail(`Black PGN: ${blackParsed.error ?? 'Could not parse.'}`)
+                    return
+                }
+
+                try {
+                    const trainingText = await window.graymatter.readTextFile(
+                        resolvedPaths.trainingStatus,
+                    )
+                    const training = parseTrainingFileJson(trainingText)
+                    if (!('error' in training)) {
+                        applyDualTrainingStatus(
+                            whiteParsed.root,
+                            blackParsed.root,
+                            training,
+                        )
+                    }
+                }
+                catch {
+                    // No training file yet — start with needsPractice defaults.
+                }
+
+                if (cancelled) return
+
+                logRepertoireTreeDfs(whiteParsed.root)
+                logRepertoireTreeDfs(blackParsed.root)
+                setLoaded({
+                    paths: resolvedPaths,
+                    whiteRepertoire: whiteParsed,
+                    blackRepertoire: blackParsed,
+                    ready: true,
+                    loadError: null,
+                })
+            }
+            catch (err) {
+                const message = err instanceof Error ? err.message : String(err)
+                fail(`Could not load repertoire files: ${message}`)
+            }
+        })()
+
+        return () => {
+            cancelled = true
+        }
+    }, [])
+
+    const viewSwitch = (
+        <SegmentedControl label="Openings mode" options={VIEW_OPTIONS} value={view} onChange={setView} />
+    )
+
+    return view === 'explore'
+        ? <ExploreView loaded={loaded} viewSwitch={viewSwitch} />
+        : (
+            <DrillView
+                settings={settings}
+                onSettingsChange={onSettingsChange}
+                loaded={loaded}
+                viewSwitch={viewSwitch}
+            />
+        )
+}
+
+type DrillViewProps = OpeningsPageProps & {
+    loaded: LoadedRepertoires
+    viewSwitch: ReactNode
+}
+
+/** Drill: plays random unpracticed lines, auto-playing book moves and waiting for the trainee's. */
+function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillViewProps) {
+    const { paths, whiteRepertoire, blackRepertoire, ready, loadError } = loaded
+    const [saveError, setSaveError] = useState<string | null>(null)
+    const parseError = saveError ?? loadError
     const trainMode = settings.openingsTrainMode
     const [activeSide, setActiveSide] = useState<Side>('w')
     const [targetPath, setTargetPath] = useState<string[] | null>(null)
@@ -743,9 +822,11 @@ export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) 
     const [sessionResetKey, setSessionResetKey] = useState(0)
     const [lessonKey, setLessonKey] = useState(0)
     const [trainingRevision, setTrainingRevision] = useState(0)
-    const [ready, setReady] = useState(false)
     const [linesFinished, setLinesFinished] = useState(0)
     const [hintTrigger, setHintTrigger] = useState(0)
+    // The current line as the board reports it, for the status card.
+    const [lineSans, setLineSans] = useState<string[]>([])
+    const [confirmingReset, setConfirmingReset] = useState(false)
     // needsPractice flags are mutated in place on the trie; bump this to re-render the lines-left count.
     const [, setProgressTick] = useState(0)
 
@@ -786,6 +867,14 @@ export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) 
     const blackLinesLeft = trainMode !== 'white' && blackRepertoire
         ? collectPracticeTerminalPaths(blackRepertoire.root, 'b', trainingDepth).length
         : 0
+    const whiteLinesTotal = trainMode !== 'black' && whiteRepertoire
+        ? collectAllTerminalPaths(whiteRepertoire.root, 'w', trainingDepth).length
+        : 0
+    const blackLinesTotal = trainMode !== 'white' && blackRepertoire
+        ? collectAllTerminalPaths(blackRepertoire.root, 'b', trainingDepth).length
+        : 0
+    const linesLeft = whiteLinesLeft + blackLinesLeft
+    const linesTotal = whiteLinesTotal + blackLinesTotal
     const linesLeftText = trainMode === 'both'
         ? `Lines left: ${whiteLinesLeft + blackLinesLeft} (White ${whiteLinesLeft}, Black ${blackLinesLeft})`
         : `Lines left: ${trainMode === 'white' ? whiteLinesLeft : blackLinesLeft}`
@@ -803,7 +892,7 @@ export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) 
             .then(() => window.graymatter.writeTextFile(currentPaths.trainingStatus, text))
             .catch((err: unknown) => {
                 console.error('Failed to save training status', err)
-                setParseError('Could not save TrainingStatus.json.')
+                setSaveError('Could not save TrainingStatus.json.')
             })
     }, [])
 
@@ -905,178 +994,43 @@ export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) 
         beginLesson(trainMode, whiteRepertoire, blackRepertoire, { resetSession: true })
     }
 
-    useEffect(() => {
-        let cancelled = false
+    const sideName = activeSide === 'w' ? 'White' : 'Black'
+    const sideToMove: Side = lineSans.length % 2 === 0 ? 'w' : 'b'
+    const traineeToMove = sideToMove === activeSide
+    const lineTokens = formatLine(lineSans)
 
-        void (async () => {
-            try {
-                if (!window.graymatter) {
-                    setParseError('GrayMatter file API is unavailable. Run this app in Electron.')
-                    return
-                }
-
-                const resolvedPaths = await window.graymatter.getPaths()
-                if (cancelled) return
-                setPaths(resolvedPaths)
-
-                const [whiteText, blackText] = await Promise.all([
-                    window.graymatter.readTextFile(resolvedPaths.whitePgn),
-                    window.graymatter.readTextFile(resolvedPaths.blackPgn),
-                ])
-                if (cancelled) return
-
-                const whiteParsed = parsePgnToRepertoire(whiteText)
-                const blackParsed = parsePgnToRepertoire(blackText)
-
-                if ('error' in whiteParsed) {
-                    setParseError(`White PGN: ${whiteParsed.error ?? 'Could not parse.'}`)
-                    return
-                }
-                if ('error' in blackParsed) {
-                    setParseError(`Black PGN: ${blackParsed.error ?? 'Could not parse.'}`)
-                    return
-                }
-
-                try {
-                    const trainingText = await window.graymatter.readTextFile(
-                        resolvedPaths.trainingStatus,
-                    )
-                    const training = parseTrainingFileJson(trainingText)
-                    if (!('error' in training)) {
-                        applyDualTrainingStatus(
-                            whiteParsed.root,
-                            blackParsed.root,
-                            training,
-                        )
-                    }
-                }
-                catch {
-                    // No training file yet — start with needsPractice defaults.
-                }
-
-                if (cancelled) return
-
-                setWhiteRepertoire(whiteParsed)
-                setBlackRepertoire(blackParsed)
-                setParseError(null)
-                logRepertoireTreeDfs(whiteParsed.root)
-                logRepertoireTreeDfs(blackParsed.root)
-                setReady(true)
-            }
-            catch (err) {
-                if (cancelled) return
-                const message = err instanceof Error ? err.message : String(err)
-                setParseError(`Could not load repertoire files: ${message}`)
-            }
-        })()
-
-        return () => {
-            cancelled = true
-        }
-    }, [])
+    let banner
+    if (!ready) {
+        banner = <StatusBanner tone="info" title={parseError ? 'Repertoires not loaded' : status} />
+    }
+    else if (!targetPath) {
+        banner = <StatusBanner tone="success" title="All lines practiced" text="Reset progress to start over" />
+    }
+    else {
+        banner = (
+            <StatusBanner
+                title={traineeToMove ? 'Your move' : 'Book move'}
+                text={`· ${sideName} repertoire`}
+                marker={traineeToMove ? undefined : <SideMarker side={sideToMove} />}
+            >
+                <div className="font-mono text-xs text-soft">
+                    {lineTokens.join(' ')}
+                    {traineeToMove && (
+                        <>
+                            {lineTokens.length ? ' ' : ''}
+                            {sideToMove === 'w' && `${lineSans.length / 2 + 1}. `}
+                            <span className="text-accent-ink">?</span>
+                        </>
+                    )}
+                </div>
+            </StatusBanner>
+        )
+    }
 
     return (
-        <div className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-10 md:flex-row md:items-start">
-            <section className="flex-1 space-y-5">
-                <header>
-                    <p className="mt-2 text-sm leading-relaxed text-slate-400">
-                        White and black repertoires load automatically from Google Drive.
-                        Progress is saved to TrainingStatus.json after each practiced move. Choose
-                        Both to alternate randomly between the two books, or lock training to
-                        one side. Only lines with unpracticed moves for your side are selected.
-                    </p>
-                </header>
-
-                <div className="space-y-3 rounded-xl border border-slate-700/80 bg-slate-900/50 p-4">
-                    <fieldset className="space-y-2">
-                        <legend className="text-sm font-medium text-slate-200">Repertoire</legend>
-                        <div className="space-y-2 pl-4">
-                            <div className="flex flex-wrap gap-4">
-                                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
-                                    <input
-                                        type="radio"
-                                        name="train"
-                                        checked={trainMode === 'both'}
-                                        onChange={() => onTrainModeChange('both')}
-                                        className="accent-amber-500"
-                                    />
-                                    Both
-                                </label>
-                                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
-                                    <input
-                                        type="radio"
-                                        name="train"
-                                        checked={trainMode === 'white'}
-                                        onChange={() => onTrainModeChange('white')}
-                                        className="accent-amber-500"
-                                    />
-                                    White
-                                </label>
-                                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
-                                    <input
-                                        type="radio"
-                                        name="train"
-                                        checked={trainMode === 'black'}
-                                        onChange={() => onTrainModeChange('black')}
-                                        className="accent-amber-500"
-                                    />
-                                    Black
-                                </label>
-                            </div>
-                            <p className="text-xs text-slate-500">
-                                Which opening repertoire to train.
-                            </p>
-                        </div>
-                    </fieldset>
-                    <div className="space-y-1 border-t border-slate-700/60 pt-3">
-                        <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium text-slate-200">Training depth</span>
-                            <span className="rounded-md bg-amber-500/15 px-2 py-0.5 font-mono text-sm text-amber-200">
-                                {depthDraft} moves
-                            </span>
-                        </div>
-                        <div className="pl-4">
-                            <DepthSlider
-                                value={depthDraft}
-                                min={MIN_TRAINING_DEPTH}
-                                max={MAX_TRAINING_DEPTH}
-                                onDraftChange={setDepthDraft}
-                                onCommit={commitDepth}
-                            />
-                            <p className="mt-1 text-xs text-slate-500">
-                                How many of your moves to train on each line before moving to the next.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                    <button
-                        type="button"
-                        onClick={() => setHintTrigger((trigger) => trigger + 1)}
-                        disabled={!ready || !targetPath}
-                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-emerald-500/60 enabled:hover:text-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                        Hint
-                    </button>
-                    <button
-                        type="button"
-                        onClick={resetTrainingProgress}
-                        disabled={!ready}
-                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-amber-500/60 enabled:hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                        Reset training progress
-                    </button>
-                </div>
-
-                {parseError && (
-                    <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">
-                        {parseError}
-                    </p>
-                )}
-            </section>
-
-            <div className="w-full max-w-[min(100%,28rem)] shrink-0 space-y-2 self-center md:self-start">
+        <BoardPage
+            label="Openings controls"
+            board={(
                 <div className="board-panel">
                     <TrainerChessboard
                         root={ready ? (activeRepertoire?.root ?? null) : null}
@@ -1090,13 +1044,110 @@ export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) 
                         hintTrigger={hintTrigger}
                         historySansRef={historySansRef}
                         onStatusChange={onStatusChange}
+                        onHistoryChange={setLineSans}
                         onLessonComplete={onLessonComplete}
                         onTrainingChanged={onTrainingChanged}
                     />
                 </div>
-                <p className="font-mono text-xs text-slate-500">{status}</p>
-            </div>
-        </div>
+            )}
+        >
+            <PanelHeader
+                title="Openings"
+                subtitle="Drill your White and Black repertoires."
+                info={'Repertoires load from Google Drive, and progress is saved to TrainingStatus.json '
+                    + 'after each practiced move. Both alternates randomly between the two books. Only '
+                    + 'lines with unpracticed moves for your side are chosen.'}
+            />
+
+            {viewSwitch}
+
+            {banner}
+
+            <Section label="Repertoire">
+                <SegmentedControl
+                    label="Repertoire"
+                    options={TRAIN_MODE_OPTIONS}
+                    value={trainMode}
+                    onChange={onTrainModeChange}
+                />
+            </Section>
+
+            <Section label="Training depth" aside={<ValueBadge>{depthDraft} moves</ValueBadge>}>
+                <RangeSlider
+                    label="Training depth"
+                    min={MIN_TRAINING_DEPTH}
+                    max={MAX_TRAINING_DEPTH}
+                    value={depthDraft}
+                    onDraft={setDepthDraft}
+                    onCommit={commitDepth}
+                />
+            </Section>
+
+            <Card>
+                <div className="flex items-baseline justify-between">
+                    <span className="text-[13px] text-soft">Lines left</span>
+                    <span className="font-mono text-[22px] font-semibold text-ink">{ready ? linesLeft : '–'}</span>
+                </div>
+                <ProgressBar
+                    label="Lines practiced"
+                    value={linesTotal - linesLeft}
+                    max={linesTotal}
+                    tone="success"
+                />
+                <div className="grid grid-cols-3 gap-2">
+                    <StatTile label="White" value={trainMode === 'black' ? '–' : whiteLinesLeft} />
+                    <StatTile label="Black" value={trainMode === 'white' ? '–' : blackLinesLeft} />
+                    <StatTile label="Session" value={linesFinished} accent />
+                </div>
+            </Card>
+
+            {parseError && <ErrorNote>{parseError}</ErrorNote>}
+
+            {confirmingReset
+                ? (
+                    <div
+                        role="alertdialog"
+                        aria-label="Confirm reset"
+                        className="mt-auto flex flex-col gap-2.5 rounded-[10px] border border-danger/35 bg-danger/10 p-3"
+                    >
+                        <span className="text-[13px] text-red-200">Mark every line as unpracticed again?</span>
+                        <div className="flex justify-end gap-2">
+                            <Button className="h-8 px-3 text-[13px]" onClick={() => setConfirmingReset(false)}>
+                                Cancel
+                            </Button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setConfirmingReset(false)
+                                    resetTrainingProgress()
+                                }}
+                                className="h-8 rounded-lg bg-red-600 px-3 text-[13px] font-semibold text-white transition hover:bg-red-500"
+                            >
+                                Reset progress
+                            </button>
+                        </div>
+                    </div>
+                )
+                : (
+                    <div className="mt-auto flex items-center gap-2">
+                        <Button
+                            className="flex-1"
+                            icon={<LightbulbIcon className="text-success" />}
+                            onClick={() => setHintTrigger((trigger) => trigger + 1)}
+                            disabled={!ready || !targetPath}
+                        >
+                            Hint
+                        </Button>
+                        <Button
+                            variant="danger"
+                            icon={<ResetIcon size={15} />}
+                            onClick={() => setConfirmingReset(true)}
+                            disabled={!ready}
+                        >
+                            Reset…
+                        </Button>
+                    </div>
+                )}
+        </BoardPage>
     )
 }
-

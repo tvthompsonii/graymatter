@@ -14,6 +14,8 @@
         "package": "npm run build && electron-builder --win"
     },
     "dependencies": {
+        "@fontsource-variable/geist": "^5.3.0",
+        "@fontsource-variable/geist-mono": "^5.3.0",
         "@jackstenglein/pgn-parser": "^2.0.13",
         "chess.js": "^1.0.0",
         "react": "^19.2.7",

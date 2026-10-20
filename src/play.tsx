@@ -1,6 +1,6 @@
 import type { Square } from 'chess.js'
 import { Chess } from 'chess.js'
-import { useCallback, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Chessboard } from 'react-chessboard'
 import type {
     PieceDropHandlerArgs,
@@ -9,6 +9,9 @@ import type {
 } from 'react-chessboard'
 
 import { boardChrome, customPieces, MOVE_ANIMATION_MS } from './boardTheme'
+import { Button } from './ui/controls'
+import { BotIcon, PlusIcon } from './ui/icons'
+import { BoardPage, Card, PanelHeader, Section, SideMarker, StatusBanner } from './ui/layout'
 
 function wait(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -77,14 +80,46 @@ const CHECKMATE_KING_STYLE: CSSProperties = {
 }
 
 
+export type PlayStatus = {
+    kind: 'your-move' | 'check' | 'bot' | 'checkmate' | 'draw'
+    /** Set when kind is 'checkmate'. */
+    winner?: 'w' | 'b'
+    /** Set when kind is 'draw', e.g. "Stalemate". */
+    reason?: string
+    /** SAN moves played so far. */
+    moves: string[]
+}
+
+function playStatusFor(game: Chess): PlayStatus {
+    const moves = game.history()
+    if (game.isCheckmate()) return { kind: 'checkmate', winner: game.turn() === 'w' ? 'b' : 'w', moves }
+    if (game.isDraw() || game.isStalemate()) {
+        const reason = game.isStalemate()
+            ? 'Stalemate'
+            : game.isInsufficientMaterial()
+                ? 'Insufficient material'
+                : game.isThreefoldRepetition() ? 'Threefold repetition' : 'Fifty-move rule'
+        return { kind: 'draw', reason, moves }
+    }
+    if (game.turn() === 'b') return { kind: 'bot', moves }
+    return { kind: game.inCheck() ? 'check' : 'your-move', moves }
+}
+
 type PlayChessboardProps = {
     boardId: string
+    /** Called after every position change with the game state and move list. */
+    onStatusChange?: (status: PlayStatus) => void
 }
 
 /** Simple board: White moves freely; Black replies with a simple heuristic. */
-export function PlayChessboard({ boardId }: PlayChessboardProps) {
+export function PlayChessboard({ boardId, onStatusChange }: PlayChessboardProps) {
     const gameRef = useRef(new Chess())
     const [fen, setFen] = useState(() => gameRef.current.fen())
+    const onStatusChangeRef = useRef(onStatusChange)
+    onStatusChangeRef.current = onStatusChange
+    useEffect(() => {
+        onStatusChangeRef.current?.(playStatusFor(gameRef.current))
+    }, [fen])
     const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
     const [optionSquares, setOptionSquares] = useState<Record<string, CSSProperties>>({})
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({})
@@ -256,42 +291,95 @@ export function PlayChessboard({ boardId }: PlayChessboardProps) {
     )
 }
 
+function PlayStatusBanner({ status }: { status: PlayStatus }) {
+    switch (status.kind) {
+        case 'checkmate':
+            return status.winner === 'w'
+                ? <StatusBanner tone="success" title="Checkmate" text="You win" />
+                : <StatusBanner tone="error" title="Checkmate" text="The bot wins" />
+        case 'draw':
+            return <StatusBanner tone="info" title="Draw" text={status.reason} />
+        case 'bot':
+            return <StatusBanner title="Bot is thinking" marker={<SideMarker side="b" />} />
+        case 'check':
+            return <StatusBanner tone="error" title="Check" text="Your move" marker={<SideMarker side="w" />} />
+        default:
+            return <StatusBanner title="Your move" text="You play White" marker={<SideMarker side="w" />} />
+    }
+}
+
+function MoveList({ moves }: { moves: string[] }) {
+    const listRef = useRef<HTMLOListElement>(null)
+    useEffect(() => {
+        const list = listRef.current
+        if (list) list.scrollTop = list.scrollHeight
+    }, [moves.length])
+
+    const rows: Array<[string, string | undefined]> = []
+    for (let i = 0; i < moves.length; i += 2) rows.push([moves[i]!, moves[i + 1]])
+    const last = moves.length - 1
+
+    return (
+        <ol
+            ref={listRef}
+            className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto rounded-[10px] border border-line bg-rail p-1.5 font-mono text-[13px]"
+        >
+            {rows.length === 0 && <li className="px-1.5 py-1 text-dim">No moves yet.</li>}
+            {rows.map(([white, black], row) => (
+                <li
+                    key={row}
+                    className={`grid grid-cols-[2rem_1fr_1fr] rounded-md px-1.5 py-1 ${
+                        Math.floor(last / 2) === row ? 'bg-raised' : ''
+                    }`}
+                >
+                    <span className="text-dim">{row + 1}.</span>
+                    <span className={row * 2 === last ? 'font-semibold text-accent-ink' : 'text-body'}>{white}</span>
+                    <span className={row * 2 + 1 === last ? 'font-semibold text-accent-ink' : 'text-body'}>{black ?? ''}</span>
+                </li>
+            ))}
+        </ol>
+    )
+}
+
 export function PlayPage() {
     const [gameKey, setGameKey] = useState(0)
+    const [status, setStatus] = useState<PlayStatus>({ kind: 'your-move', moves: [] })
 
     const startNewGame = () => {
         setGameKey((key) => key + 1)
     }
 
     return (
-        <div className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-10 md:flex-row md:items-start">
-            <section className="flex-1 space-y-5">
-                <header>
-                    <p className="mt-2 text-sm leading-relaxed text-slate-400">
-                        Play against a bot. Engine strength and openings will come later; for now you
-                        move White and Black prefers captures, then checks, otherwise a random move.
-                    </p>
-                </header>
-
-                <div className="flex flex-wrap gap-2">
-                    <button
-                        type="button"
-                        onClick={startNewGame}
-                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition enabled:hover:border-amber-500/60 enabled:hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                        New Game
-                    </button>
+        <BoardPage
+            label="Game controls"
+            board={(
+                <div className="board-panel">
+                    <PlayChessboard key={gameKey} boardId="PlayBoard" onStatusChange={setStatus} />
                 </div>
+            )}
+        >
+            <PanelHeader title="Play" subtitle="A casual game against a simple bot." />
 
-                <p className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-300">
-                    Your move as White.
-                </p>
-            </section>
+            <Card row>
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-line-strong bg-rail text-soft">
+                    <BotIcon size={18} />
+                </span>
+                <div className="min-w-0">
+                    <div className="text-sm font-semibold text-ink">Bot · Black</div>
+                    <div className="text-xs text-muted">Looks for captures first, then checks, else plays a random move.</div>
+                </div>
+            </Card>
 
-            <div className="board-panel w-full max-w-[min(100%,28rem)] shrink-0 self-center md:self-start">
-                <PlayChessboard key={gameKey} boardId="PlayBoard" />
-            </div>
-        </div>
+            <PlayStatusBanner status={status} />
+
+            <Section label="Moves" className="min-h-0 flex-1">
+                <MoveList moves={status.moves} />
+            </Section>
+
+            <Button variant="primary" icon={<PlusIcon strokeWidth={2.4} />} onClick={startNewGame}>
+                New game
+            </Button>
+        </BoardPage>
     )
 }
 
