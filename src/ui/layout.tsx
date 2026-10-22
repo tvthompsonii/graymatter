@@ -5,17 +5,31 @@ import { CheckIcon, InfoIcon, XIcon } from './icons'
 
 /**
  * Board-first page: the board (sized by `.board-slot` from the window height) on the left and
- * the mode's side panel filling the rest of the row.
+ * the mode's side panel filling the rest of the row. The panel body scrolls when it runs out of
+ * room; `footer` (e.g. the main action buttons) stays pinned below it so it is always reachable.
  */
-export function BoardPage({ board, children, label }: { board: ReactNode; children: ReactNode; label: string }) {
+export function BoardPage({
+    board,
+    children,
+    label,
+    footer,
+}: {
+    board: ReactNode
+    children: ReactNode
+    label: string
+    footer?: ReactNode
+}) {
     return (
         <div className="board-page flex h-full gap-6 p-6">
             <div className="board-slot">{board}</div>
             <section
                 aria-label={label}
-                className="flex h-full min-w-0 flex-1 flex-col gap-4 overflow-y-auto rounded-[14px] border border-edge bg-panel p-5"
+                className="flex h-full min-w-0 flex-1 flex-col rounded-[14px] border border-edge bg-panel"
             >
-                {children}
+                <div className={`flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5 ${footer ? 'pb-4' : ''}`}>
+                    {children}
+                </div>
+                {footer && <div className="shrink-0 px-5 pb-5">{footer}</div>}
             </section>
         </div>
     )

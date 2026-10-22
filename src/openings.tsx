@@ -1,6 +1,6 @@
 import type { Square } from 'chess.js'
 import { Chess, type Move } from 'chess.js'
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Chessboard } from 'react-chessboard'
 import type {
     PieceDropHandlerArgs,
@@ -10,6 +10,7 @@ import type {
 
 import {
     boardChrome,
+    CORRECT_MOVE_DISPLAY_MS,
     customPieces,
     HINT_SQUARE_STYLE,
     MOVE_ANIMATION_MS,
@@ -19,36 +20,27 @@ import {
     WRONG_SQUARE_STYLE,
 } from './boardTheme'
 import type { GraymatterPaths } from './graymatter'
-import {
-    collectAllTerminalPaths,
-    collectPracticeTerminalPaths,
-    countPlayerMoves,
-    fenSig,
-    formatLine,
-    legalChildSans,
-    logRepertoireTreeDfs,
-    normalizeSan,
-    pathHasPracticeAhead,
-    pickRandomPracticePath,
-    repertoireSanForPlayed,
-    resetNeedsPractice,
-    treeHasPracticeRemaining,
-    walkToNode,
-    type Node,
-} from './moveTree'
+import { fenSig, formatLine, logRepertoireTreeDfs, normalizeSan } from './moveTree'
 import { ExploreView } from './openingExplorer'
 import { parsePgnToRepertoire, type ParsedRepertoire } from './pgnPaths'
-import type { AppSettings, TrainMode } from './settings'
+import { buildCardDeck, pickSetupPath, type Card, type CardDeck } from './repertoireCards'
+import { NEW_CARDS_PER_DAY_MAX, NEW_CARDS_PER_DAY_MIN, type AppSettings, type TrainMode } from './settings'
 import {
-    applyDualTrainingStatus,
-    parseTrainingFileJson,
-    serializeDualTrainingStatus,
-} from './trainingExport'
+    deckStats,
+    formatWait,
+    gradeCard,
+    pickChainPath,
+    pickNextCard,
+    type ChainPick,
+    type PickOptions,
+    type Schedule,
+} from './srs'
+import { mergeSchedules, parseTrainingFileJson, serializeTrainingFile } from './trainingExport'
 import { Button, RangeSlider, SegmentedControl, ValueBadge } from './ui/controls'
 import { LightbulbIcon, ResetIcon } from './ui/icons'
 import {
     BoardPage,
-    Card,
+    Card as PanelCard,
     ErrorNote,
     PanelHeader,
     ProgressBar,
@@ -60,26 +52,32 @@ import {
 
 export type Side = 'w' | 'b'
 
-export type TrainerChessboardProps = {
-    root: Node | null
-    /** Progress summary shown in the status line, e.g. "Lines left: 54 · Finished this session: 3". */
-    progressText: string
+export type CardChessboardProps = {
+    /** The active side's deck; null while loading. */
+    deck: CardDeck | null
     playerSide: Side
-    /** Exact SAN path for the current drill line; null when nothing left to practice. */
-    targetPath: readonly string[] | null
-    trainingDepth: number
-    sessionResetKey: number
+    /** Card to set up when `lessonKey` changes; null shows the start position, locked. */
+    card: Card | null
+    /** Moves from the start that reach `card`'s position. */
+    setupPath: readonly string[] | null
+    /** Bump to jump to `card`. */
     lessonKey: number
-    trainingRevision: number
-    /** Bump to outline the square of the piece the trainee should move next. */
+    /** Bump to outline the square of the piece the trainee should move (grades the card a fail). */
     hintTrigger: number
-    /** SAN moves played so far in the current line; owned by the page so a depth change can inspect it. */
+    /** SAN moves played so far; owned by the page for the status line. */
     historySansRef: { current: string[] }
-    onStatusChange: (status: string) => void
     /** Called with a copy of historySansRef whenever the position changes. */
     onHistoryChange?: (sans: string[]) => void
-    onLessonComplete: () => void
-    onTrainingChanged: () => void
+    /** The card now waiting for the trainee (after a jump or a chained reply). */
+    onCardShown: (card: Card) => void
+    /** Called once per showing: on the first wrong move or hint (fail), or the correct move (pass). */
+    onCardAnswered: (card: Card, pass: boolean) => void
+    /** The trainee played a different book move for this position; taken back with no penalty. */
+    onAlternateBookMove: () => void
+    /** Book moves from this position (after the trainee's correct answer to `answeredId`) to the next card worth testing now. */
+    pickChain: (positionKey: string, answeredId: string) => ChainPick | null
+    /** The chain ended (no continuation leads to a card to test); the page jumps to the next card. */
+    onChainEnd: () => void
 }
 
 function wait(ms: number): Promise<void> {
@@ -163,35 +161,39 @@ function applyUserMove(
     }
 }
 
-export function TrainerChessboard({
-    root,
-    progressText,
+/**
+ * Tests one card at a time: sets up its position, waits for the trainee's move, then chains
+ * on through the book (opponent replies plus any of the trainee's not-due moves) to the next
+ * card worth testing, when there is one.
+ */
+export function CardChessboard({
+    deck,
     playerSide,
-    targetPath,
-    trainingDepth,
-    sessionResetKey,
+    card,
+    setupPath,
     lessonKey,
-    trainingRevision,
     hintTrigger,
     historySansRef,
-    onStatusChange,
     onHistoryChange,
-    onLessonComplete,
-    onTrainingChanged,
-}: TrainerChessboardProps) {
+    onCardShown,
+    onCardAnswered,
+    onAlternateBookMove,
+    pickChain,
+    onChainEnd,
+}: CardChessboardProps) {
     const gameRef = useRef(new Chess())
-    const targetPathRef = useRef(targetPath)
-    targetPathRef.current = targetPath
-    // Read through a ref so a depth change alone doesn't re-settle the board; the page decides
-    // whether the current line survives a new depth (and swaps targetPath or starts a new lesson).
-    const trainingDepthRef = useRef(trainingDepth)
-    trainingDepthRef.current = trainingDepth
-    const branchDrillsRef = useRef(new Map<string, Set<string>>())
-    const settlingRef = useRef(false)
     const runIdRef = useRef(0)
-    const leafHandledRef = useRef(false)
-    const previousRootRef = useRef<Node | null>(null)
-    const previousSessionResetKeyRef = useRef(sessionResetKey)
+    // Read the jump target through refs so only a lessonKey bump sets the board up again.
+    const cardRef = useRef(card)
+    cardRef.current = card
+    const setupPathRef = useRef(setupPath)
+    setupPathRef.current = setupPath
+    /** The card waiting for the trainee, or null while book moves are being played. */
+    const currentCardRef = useRef<Card | null>(null)
+    /** True once the current card has been graded this showing. */
+    const gradedRef = useRef(false)
+    // True while a wrong move is displayed; blocks input until it is taken back.
+    const showingWrongMoveRef = useRef(false)
 
     const [fen, setFen] = useState(() => gameRef.current.fen())
     const [boardKey, setBoardKey] = useState(0)
@@ -200,273 +202,126 @@ export function TrainerChessboard({
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({});
     const [hintSquare, setHintSquare] = useState<string | null>(null)
     const [wrongSquare, setWrongSquare] = useState<string | null>(null)
-    // True while a wrong move is displayed; blocks input until it is taken back.
-    const showingWrongMoveRef = useRef(false)
 
-    // Every history change is followed by a position change, so report the line on each new fen.
+    const callbacksRef = useRef({ onCardShown, onCardAnswered, onAlternateBookMove, pickChain, onChainEnd })
+    callbacksRef.current = { onCardShown, onCardAnswered, onAlternateBookMove, pickChain, onChainEnd }
+
+    // True while a jump's setup moves are being played; the full line was already reported.
+    const settingUpRef = useRef(false)
+
+    // Every history change is followed by a position change, so report the line on each new fen
+    // (except during setup, so the panel doesn't step through the moves it already shows).
     const onHistoryChangeRef = useRef(onHistoryChange)
     onHistoryChangeRef.current = onHistoryChange
     useEffect(() => {
+        if (settingUpRef.current) return
         onHistoryChangeRef.current?.([...historySansRef.current])
     }, [fen, historySansRef])
 
-    const rebuildStatus = useCallback(() => {
-        if (!root) {
-            onStatusChange('Loading repertoires…')
-        }
-        else if (!targetPath) {
-            onStatusChange('All lines practiced. Reset training progress to start over.')
-        }
-        else {
-            onStatusChange(progressText)
-        }
-    }, [onStatusChange, progressText, root, targetPath])
-
-    useEffect(() => {
-        rebuildStatus()
-    }, [rebuildStatus])
-
-    const onLessonCompleteRef = useRef(onLessonComplete)
-    onLessonCompleteRef.current = onLessonComplete
-    const onTrainingChangedRef = useRef(onTrainingChanged)
-    onTrainingChangedRef.current = onTrainingChanged
-
-    const finishLineAndAdvance = useCallback(() => {
-        if (leafHandledRef.current) return
-        leafHandledRef.current = true
-        settlingRef.current = false
-        onLessonCompleteRef.current()
-    }, [])
-
-    const applyBookMove = useCallback(async (
-        san: string,
-        runId: number,
-    ): Promise<boolean> => {
+    const applyBookMove = useCallback(async (san: string, runId: number): Promise<boolean> => {
         try {
             const move = gameRef.current.move(san, { strict: false })
-            if (!move) return false
-            historySansRef.current.push(san)
+            historySansRef.current.push(move.san)
             setFen(gameRef.current.fen())
-            setLastMoveSquares({ from: move.from, to: move.to });
+            setLastMoveSquares({ from: move.from, to: move.to })
             await wait(MOVE_ANIMATION_MS)
             return runId === runIdRef.current
         }
         catch {
             return false
         }
+    }, [historySansRef])
+
+    const showCard = useCallback((next: Card) => {
+        currentCardRef.current = next
+        gradedRef.current = false
+        callbacksRef.current.onCardShown(next)
     }, [])
 
-    const startLesson = useCallback(async (animateFirstMove: boolean) => {
+    const grade = useCallback((pass: boolean) => {
+        const current = currentCardRef.current
+        if (!current || gradedRef.current) return
+        gradedRef.current = true
+        callbacksRef.current.onCardAnswered(current, pass)
+    }, [])
+
+    /** Hint pressed while setup moves were still playing; shown once the card is up. */
+    const pendingHintRef = useRef(false)
+
+    const showHint = useCallback(() => {
+        const current = currentCardRef.current
+        if (!current) return
+        grade(false)
+        setHintSquare(current.uci.slice(0, 2))
+    }, [grade])
+
+    // Jump: report the whole setup line up front, then play it out from the start position one
+    // book move at a time (MOVE_ANIMATION_MS apart) and wait for the trainee.
+    useEffect(() => {
         const runId = ++runIdRef.current
-        settlingRef.current = false
-        leafHandledRef.current = false
-        gameRef.current = new Chess()
-        historySansRef.current = []
+        const target = cardRef.current
+        const setup = setupPathRef.current ?? []
+        currentCardRef.current = null
+        pendingHintRef.current = false
         showingWrongMoveRef.current = false
         setSelectedSquare(null)
-        setLastMoveSquares({})
         setOptionSquares({})
         setHintSquare(null)
         setWrongSquare(null)
+        setLastMoveSquares({})
 
-        if (root && playerSide === 'b') {
-            const first = targetPathRef.current?.[0]
-                ?? legalChildSans(gameRef.current, root).sort()[0]
-            if (first) {
-                gameRef.current.move(first, { strict: false })
-                historySansRef.current.push(first)
-            }
-        }
-
+        gameRef.current = new Chess()
+        historySansRef.current = []
         setFen(gameRef.current.fen())
         setBoardKey((key) => key + 1)
 
-        if (animateFirstMove && playerSide === 'b')
-            await wait(MOVE_ANIMATION_MS)
+        settingUpRef.current = !!target && !!deck
+        if (!target || !deck) return
 
-        return runId
-    }, [historySansRef, playerSide, root])
-
-    const settleAfterChange = useCallback(async () => {
-        if (!root || settlingRef.current) return
-        const runId = runIdRef.current
-        settlingRef.current = true
-
-        try {
-            while (runId === runIdRef.current) {
-                const history = historySansRef.current
-
-                if (countPlayerMoves(history, playerSide) >= trainingDepthRef.current) {
-                    finishLineAndAdvance()
-                    return
-                }
-
-                // The trainee's move must be the last one played: once none of their remaining
-                // moves on this line need practice, stop instead of auto-playing further book moves.
-                if (targetPath && !pathHasPracticeAhead(root, targetPath, history.length, playerSide)) {
-                    finishLineAndAdvance()
-                    return
-                }
-
-                const node = walkToNode(root, history)
-
-                if (!node || node.children.size === 0) {
-                    // End of line — always advance, whether trainee or book played the last move.
-                    finishLineAndAdvance()
-                    return
-                }
-
-                const outs = legalChildSans(gameRef.current, node)
-                if (!outs.length) {
-                    finishLineAndAdvance()
-                    return
-                }
-
-                const nextOnPath = targetPath?.[historySansRef.current.length]
-                const game = gameRef.current
-
-                if (game.turn() === playerSide) {
-                    if (nextOnPath && outs.includes(nextOnPath)) {
-                        const child = node.children.get(nextOnPath)
-                        if (child?.needsPractice) break
-                        if (!(await applyBookMove(nextOnPath, runId))) break
-                        continue
-                    }
-
-                    const needsPractice = outs.filter(
-                        (san) => node.children.get(san)?.needsPractice === true,
-                    )
-                    if (needsPractice.length) break
-
-                    const practicedMove = nextOnPath && outs.includes(nextOnPath)
-                        ? nextOnPath
-                        : [...outs].sort()[0]!
-                    if (!(await applyBookMove(practicedMove, runId))) break
-                    continue
-                }
-
-                let opponentMove: string
-                if (nextOnPath && outs.includes(nextOnPath)) {
-                    opponentMove = nextOnPath
-                }
-                else if (outs.length === 1) {
-                    opponentMove = outs[0]!
-                }
-                else {
-                    const signature = fenSig(game.fen())
-                    let used = branchDrillsRef.current.get(signature)
-                    if (!used) {
-                        used = new Set()
-                        branchDrillsRef.current.set(signature, used)
-                    }
-
-                    let choices = outs.filter((san) => !used.has(san))
-                    if (!choices.length) {
-                        used.clear()
-                        choices = outs
-                    }
-                    opponentMove = choices[Math.floor(Math.random() * choices.length)]!
-                    used.add(opponentMove)
-                }
-
-                if (!(await applyBookMove(opponentMove, runId))) break
-            }
-
-            const endHistory = historySansRef.current
-            if (countPlayerMoves(endHistory, playerSide) >= trainingDepthRef.current) {
-                finishLineAndAdvance()
-                return
-            }
-            const endNode = walkToNode(root, endHistory)
-            if (!endNode || endNode.children.size === 0) {
-                finishLineAndAdvance()
-            }
-        }
-        finally {
-            settlingRef.current = false
-        }
-    }, [
-        applyBookMove,
-        finishLineAndAdvance,
-        playerSide,
-        root,
-        targetPath,
-    ])
-
-    // Restart the board only for a new lesson (or side/repertoire/session change). A targetPath or
-    // depth change alone keeps the current position; the effect below re-settles against it.
-    const startLessonRef = useRef(startLesson)
-    startLessonRef.current = startLesson
-    const settleAfterChangeRef = useRef(settleAfterChange)
-    settleAfterChangeRef.current = settleAfterChange
-
-    useEffect(() => {
-        const rootChanged = previousRootRef.current !== root
-        const sessionWasReset =
-            previousSessionResetKeyRef.current !== sessionResetKey
-        previousRootRef.current = root
-        previousSessionResetKeyRef.current = sessionResetKey
-        if (rootChanged || sessionWasReset) {
-            branchDrillsRef.current = new Map()
-        }
+        const setupSans = setupLineSans(setup)
+        onHistoryChangeRef.current?.(setupSans)
 
         void (async () => {
-            await startLessonRef.current(false)
-            await settleAfterChangeRef.current()
+            // Let the remounted board render the start position before the first move animates.
+            await wait(100)
+            for (const san of setupSans) {
+                if (runId !== runIdRef.current) return
+                if (!(await applyBookMove(san, runId))) return
+            }
+            if (runId !== runIdRef.current) return
+            settingUpRef.current = false
+            showCard(target)
+            if (pendingHintRef.current) {
+                pendingHintRef.current = false
+                showHint()
+            }
         })()
-    }, [playerSide, root, sessionResetKey, lessonKey])
-
-    useEffect(() => {
-        if (!root) return
-        void settleAfterChange()
-    }, [root, settleAfterChange, trainingRevision])
-
-    const legalPlayerSansNeedingPractice = useCallback((): string[] => {
-        if (!root || gameRef.current.turn() !== playerSide) return []
-        const node = walkToNode(root, historySansRef.current)
-        if (!node) return []
-
-        const nextOnPath = targetPath?.[historySansRef.current.length]
-        if (nextOnPath) {
-            const child = node.children.get(nextOnPath)
-            if (child?.needsPractice) return [nextOnPath]
-            return []
-        }
-
-        return legalChildSans(gameRef.current, node).filter(
-            (san) => node.children.get(san)?.needsPractice === true,
-        )
-    }, [playerSide, root, targetPath])
+    }, [applyBookMove, deck, historySansRef, lessonKey, playerSide, showCard, showHint])
 
     const handledHintTriggerRef = useRef(hintTrigger)
     useEffect(() => {
         // Respond only to new Hint presses, not to lesson changes re-creating the callback.
         if (hintTrigger === handledHintTriggerRef.current) return
         handledHintTriggerRef.current = hintTrigger
+        if (settingUpRef.current) {
+            pendingHintRef.current = true
+            return
+        }
         if (showingWrongMoveRef.current) return
-
-        const san = legalPlayerSansNeedingPractice()[0]
-        if (!san) return
-        try {
-            const move = new Chess(gameRef.current.fen()).move(san, { strict: false })
-            if (move) setHintSquare(move.from)
-        }
-        catch {
-            // Repertoire move not playable here; no hint to show.
-        }
-    }, [hintTrigger, legalPlayerSansNeedingPractice])
+        showHint()
+    }, [hintTrigger, showHint])
 
     const canDragPiece = useCallback(({ piece }: PieceHandlerArgs): boolean => {
-        if (showingWrongMoveRef.current) return false
-        if (piece.pieceType[0] !== playerSide) return false
-        return legalPlayerSansNeedingPractice().length > 0
-    }, [legalPlayerSansNeedingPractice, playerSide])
+        if (showingWrongMoveRef.current || !currentCardRef.current) return false
+        return piece.pieceType[0] === playerSide
+    }, [playerSide])
 
     const attemptPlayerMove = useCallback((
         sourceSquare: string,
         targetSquare: string | null,
     ): boolean => {
-        if (!root || !targetSquare || showingWrongMoveRef.current) return false
+        const current = currentCardRef.current
+        if (!deck || !current || !targetSquare || showingWrongMoveRef.current) return false
         if (sourceSquare === targetSquare) {
             setSelectedSquare(null)
             return true
@@ -479,15 +334,20 @@ export function TrainerChessboard({
         if (!piece || piece.color !== playerSide || game.turn() !== playerSide)
             return false
 
-        const allowed = legalPlayerSansNeedingPractice()
-        if (!allowed.length) return false
-
-        const match = findMatchingOutcome(game, from, to, allowed)
+        const match = findMatchingOutcome(game, from, to, [current.san])
         if (!match) {
             // Illegal moves just snap back. A legal but wrong move stays on the board,
             // outlined in red, then is taken back; the real game state is never touched.
             const wrongFen = fenAfterAttempt(game, from, to)
             if (!wrongFen) return false
+
+            const otherBookSans = (deck.cardsAt.get(current.posKey) ?? [])
+                .filter((c) => c.id !== current.id)
+                .map((c) => c.san)
+            if (findMatchingOutcome(game, from, to, otherBookSans))
+                callbacksRef.current.onAlternateBookMove()
+            else
+                grade(false)
 
             showingWrongMoveRef.current = true
             setSelectedSquare(null)
@@ -508,30 +368,38 @@ export function TrainerChessboard({
         const move = applyUserMove(game, from, to, match)
         if (!move) return false
 
-        const repertoireSan = repertoireSanForPlayed(allowed, move.san) ?? move.san
-        historySansRef.current.push(repertoireSan)
-        const playedNode = walkToNode(root, historySansRef.current)
-        if (playedNode) {
-            playedNode.needsPractice = false
-            onTrainingChangedRef.current()
-        }
-
+        grade(true)
+        currentCardRef.current = null
+        historySansRef.current.push(move.san)
         setSelectedSquare(null)
         setHintSquare(null)
         setFen(game.fen())
         setLastMoveSquares({ from: move.from, to: move.to })
+
+        // The schedule was just updated by grade(), so the chain choice can be made right away.
+        const chain = callbacksRef.current.pickChain(fenSig(game.fen()), current.id)
         const runId = runIdRef.current
+        if (!chain) {
+            // Last move of the chain: hold it outlined in green before jumping to the next card.
+            setHintSquare(move.to)
+            void (async () => {
+                await wait(CORRECT_MOVE_DISPLAY_MS)
+                if (runId !== runIdRef.current) return
+                setHintSquare(null)
+                callbacksRef.current.onChainEnd()
+            })()
+            return true
+        }
         void (async () => {
             await wait(MOVE_ANIMATION_MS)
-            if (runId === runIdRef.current) await settleAfterChange()
+            for (const san of chain.sans) {
+                if (runId !== runIdRef.current) return
+                if (!(await applyBookMove(san, runId))) return
+            }
+            if (runId === runIdRef.current) showCard(chain.card)
         })()
         return true
-    }, [
-        legalPlayerSansNeedingPractice,
-        playerSide,
-        root,
-        settleAfterChange,
-    ])
+    }, [applyBookMove, deck, grade, historySansRef, playerSide, showCard])
 
     const getMoveOptions = useCallback((square: Square) => {
         const moves = gameRef.current.moves({ square, verbose: true });
@@ -543,7 +411,7 @@ export function TrainerChessboard({
         const newSquares: Record<string, React.CSSProperties> = {};
         moves.forEach((move) => {
                 newSquares[move.to] = {
-                        background: gameRef.current.get(move.to) && gameRef.current.get(move.to)?.color !== gameRef.current.get(square)?.color 
+                        background: gameRef.current.get(move.to) && gameRef.current.get(move.to)?.color !== gameRef.current.get(square)?.color
                                 ? 'radial-gradient(circle, transparent 70%, rgba(0,0,0,.1) 70%)'   // larger circle for capturing
                                 : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)'  // smaller circle for open square
                 };
@@ -633,41 +501,6 @@ export function TrainerChessboard({
     )
 }
 
-function pickActiveSide(
-    mode: TrainMode,
-    white: ParsedRepertoire | null,
-    black: ParsedRepertoire | null,
-    trainingDepth: number,
-): Side | null {
-    const whiteOk = mode !== 'black' && !!white && treeHasPracticeRemaining(white.root, 'w', trainingDepth)
-    const blackOk = mode !== 'white' && !!black && treeHasPracticeRemaining(black.root, 'b', trainingDepth)
-
-    if (mode === 'white') return white ? 'w' : null
-    if (mode === 'black') return black ? 'b' : null
-
-    const candidates: Side[] = []
-    if (whiteOk) candidates.push('w')
-    if (blackOk) candidates.push('b')
-    if (candidates.length) {
-        return candidates[Math.floor(Math.random() * candidates.length)]!
-    }
-
-    if (white) return 'w'
-    if (black) return 'b'
-    return null
-}
-
-function modeHasPracticeRemaining(
-    mode: TrainMode,
-    white: ParsedRepertoire | null,
-    black: ParsedRepertoire | null,
-    trainingDepth: number,
-): boolean {
-    if (mode !== 'black' && white && treeHasPracticeRemaining(white.root, 'w', trainingDepth)) return true
-    if (mode !== 'white' && black && treeHasPracticeRemaining(black.root, 'b', trainingDepth)) return true
-    return false
-}
-
 // Fixed slider range, so the track renders correctly before the repertoires have loaded.
 const MIN_TRAINING_DEPTH = 3
 const MAX_TRAINING_DEPTH = 20
@@ -695,7 +528,7 @@ export type LoadedRepertoires = {
     paths: GraymatterPaths | null
     whiteRepertoire: ParsedRepertoire | null
     blackRepertoire: ParsedRepertoire | null
-    /** True once both PGNs are parsed and TrainingStatus.json is overlaid. */
+    /** True once both PGNs are parsed. */
     ready: boolean
     loadError: string | null
 }
@@ -749,25 +582,6 @@ export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) 
                     return
                 }
 
-                try {
-                    const trainingText = await window.graymatter.readTextFile(
-                        resolvedPaths.trainingStatus,
-                    )
-                    const training = parseTrainingFileJson(trainingText)
-                    if (!('error' in training)) {
-                        applyDualTrainingStatus(
-                            whiteParsed.root,
-                            blackParsed.root,
-                            training,
-                        )
-                    }
-                }
-                catch {
-                    // No training file yet — start with needsPractice defaults.
-                }
-
-                if (cancelled) return
-
                 logRepertoireTreeDfs(whiteParsed.root)
                 logRepertoireTreeDfs(blackParsed.root)
                 setLoaded({
@@ -810,206 +624,275 @@ type DrillViewProps = OpeningsPageProps & {
     viewSwitch: ReactNode
 }
 
-/** Drill: plays random unpracticed lines, auto-playing book moves and waiting for the trainee's. */
+/** Setup moves in chess.js SAN (as the board reports them), for the panel's line. */
+function setupLineSans(setup: readonly string[]): string[] {
+    const game = new Chess()
+    const sans: string[] = []
+    for (const san of setup) {
+        try {
+            sans.push(game.move(san, { strict: false }).san)
+        }
+        catch {
+            break
+        }
+    }
+    return sans
+}
+
+/** How often the panel's due counts refresh, and an idle drill re-checks for due cards. */
+const DRILL_TICK_MS = 30_000
+
+/**
+ * Drill: spaced repetition over the trainee's moves. Each card is one (position, book move);
+ * the schedule lives in TrainingStatus.json and is merged with the copy on disk on every save.
+ */
 function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillViewProps) {
     const { paths, whiteRepertoire, blackRepertoire, ready, loadError } = loaded
     const [saveError, setSaveError] = useState<string | null>(null)
     const parseError = saveError ?? loadError
     const trainMode = settings.openingsTrainMode
+    const newPerDay = settings.openingsNewPerDay
     const [activeSide, setActiveSide] = useState<Side>('w')
-    const [targetPath, setTargetPath] = useState<string[] | null>(null)
-    const [status, setStatus] = useState('Loading repertoires…')
-    const [sessionResetKey, setSessionResetKey] = useState(0)
+    const [jumpCard, setJumpCard] = useState<Card | null>(null)
+    const [setupPath, setSetupPath] = useState<string[] | null>(null)
     const [lessonKey, setLessonKey] = useState(0)
-    const [trainingRevision, setTrainingRevision] = useState(0)
-    const [linesFinished, setLinesFinished] = useState(0)
+    const [currentCard, setCurrentCard] = useState<Card | null>(null)
+    const [scheduleReady, setScheduleReady] = useState(false)
+    // The schedule is mutated in place; bump this to re-render the counts.
+    const [, setScheduleRevision] = useState(0)
+    const [sessionReviews, setSessionReviews] = useState(0)
     const [hintTrigger, setHintTrigger] = useState(0)
+    const [showAlternateNotice, setShowAlternateNotice] = useState(false)
     // The current line as the board reports it, for the status card.
     const [lineSans, setLineSans] = useState<string[]>([])
     const [confirmingReset, setConfirmingReset] = useState(false)
-    // needsPractice flags are mutated in place on the trie; bump this to re-render the lines-left count.
-    const [, setProgressTick] = useState(0)
 
     const trainingDepth = Math.min(
         MAX_TRAINING_DEPTH,
         Math.max(MIN_TRAINING_DEPTH, settings.trainingDepth),
     )
 
-    // Dragging the slider only moves this draft; the depth is saved when the thumb is released.
+    // Dragging a slider only moves its draft; the value is saved when the thumb is released.
     const [depthDraft, setDepthDraft] = useState(trainingDepth)
     useEffect(() => {
         setDepthDraft(trainingDepth)
     }, [trainingDepth])
-    const commitDepth = (value: number) => {
-        if (value !== trainingDepth) onSettingsChange({ trainingDepth: value })
-    }
+    const [newPerDayDraft, setNewPerDayDraft] = useState(newPerDay)
+    useEffect(() => {
+        setNewPerDayDraft(newPerDay)
+    }, [newPerDay])
 
-    const whiteRef = useRef<ParsedRepertoire | null>(null)
-    const blackRef = useRef<ParsedRepertoire | null>(null)
+    const whiteDeck = useMemo(
+        () => (whiteRepertoire ? buildCardDeck(whiteRepertoire.root, 'w') : null),
+        [whiteRepertoire],
+    )
+    const blackDeck = useMemo(
+        () => (blackRepertoire ? buildCardDeck(blackRepertoire.root, 'b') : null),
+        [blackRepertoire],
+    )
+    const decksForMode = useCallback((mode: TrainMode): CardDeck[] => {
+        const decks: CardDeck[] = []
+        if (mode !== 'black' && whiteDeck) decks.push(whiteDeck)
+        if (mode !== 'white' && blackDeck) decks.push(blackDeck)
+        return decks
+    }, [blackDeck, whiteDeck])
+
+    const scheduleRef = useRef<Schedule>(new Map())
     const pathsRef = useRef<GraymatterPaths | null>(null)
-    const targetPathRef = useRef<string[] | null>(null)
-    const trainingDepthRef = useRef(trainingDepth)
-    const historySansRef = useRef<string[]>([])
     const saveChainRef = useRef(Promise.resolve())
-
-    whiteRef.current = whiteRepertoire
-    blackRef.current = blackRepertoire
+    const historySansRef = useRef<string[]>([])
+    const currentCardRef = useRef<Card | null>(null)
+    const jumpCardRef = useRef<Card | null>(null)
     pathsRef.current = paths
-    targetPathRef.current = targetPath
-    trainingDepthRef.current = trainingDepth
+    currentCardRef.current = currentCard
+    jumpCardRef.current = jumpCard
 
-    const activeRepertoire =
-        activeSide === 'w' ? whiteRepertoire : blackRepertoire
+    // Settings read inside stable callbacks, so changing them doesn't restart the current card.
+    const pickOptionsRef = useRef<Omit<PickOptions, 'now'>>({ maxDepth: trainingDepth, newPerDay })
+    pickOptionsRef.current = { maxDepth: trainingDepth, newPerDay }
+    const pickOptions = (): PickOptions => ({ ...pickOptionsRef.current, now: new Date() })
 
-    const whiteLinesLeft = trainMode !== 'black' && whiteRepertoire
-        ? collectPracticeTerminalPaths(whiteRepertoire.root, 'w', trainingDepth).length
-        : 0
-    const blackLinesLeft = trainMode !== 'white' && blackRepertoire
-        ? collectPracticeTerminalPaths(blackRepertoire.root, 'b', trainingDepth).length
-        : 0
-    const whiteLinesTotal = trainMode !== 'black' && whiteRepertoire
-        ? collectAllTerminalPaths(whiteRepertoire.root, 'w', trainingDepth).length
-        : 0
-    const blackLinesTotal = trainMode !== 'white' && blackRepertoire
-        ? collectAllTerminalPaths(blackRepertoire.root, 'b', trainingDepth).length
-        : 0
-    const linesLeft = whiteLinesLeft + blackLinesLeft
-    const linesTotal = whiteLinesTotal + blackLinesTotal
-    const linesLeftText = trainMode === 'both'
-        ? `Lines left: ${whiteLinesLeft + blackLinesLeft} (White ${whiteLinesLeft}, Black ${blackLinesLeft})`
-        : `Lines left: ${trainMode === 'white' ? whiteLinesLeft : blackLinesLeft}`
-    const progressText = `${linesLeftText} · Finished this session: ${linesFinished}`
+    // Re-read the schedule every time Drill opens, so reviews from the other client show up.
+    useEffect(() => {
+        if (!paths) return
+        let cancelled = false
+        void (async () => {
+            let schedule: Schedule = new Map()
+            try {
+                schedule = parseTrainingFileJson(await window.graymatter.readTextFile(paths.trainingStatus))
+            }
+            catch {
+                // No training file yet — every card starts new.
+            }
+            if (cancelled) return
+            scheduleRef.current = schedule
+            setScheduleReady(true)
+        })()
+        return () => {
+            cancelled = true
+        }
+    }, [paths])
 
-    const persistTraining = useCallback(() => {
+    /** Saves the schedule, first merging in the copy on disk unless `replace` (used by reset). */
+    const persistSchedule = useCallback((opts?: { replace?: boolean }) => {
         const currentPaths = pathsRef.current
-        const white = whiteRef.current
-        const black = blackRef.current
-        if (!currentPaths || !white || !black) return
-
-        const payload = serializeDualTrainingStatus(white.root, black.root)
-        const text = JSON.stringify(payload, null, 4)
+        if (!currentPaths) return
         saveChainRef.current = saveChainRef.current
-            .then(() => window.graymatter.writeTextFile(currentPaths.trainingStatus, text))
+            .then(async () => {
+                if (!opts?.replace) {
+                    let onDisk: Schedule = new Map()
+                    try {
+                        onDisk = parseTrainingFileJson(await window.graymatter.readTextFile(currentPaths.trainingStatus))
+                    }
+                    catch {
+                        // Missing file: nothing to merge.
+                    }
+                    // Merge after the read so a review made while it was in flight isn't lost.
+                    scheduleRef.current = mergeSchedules(onDisk, scheduleRef.current)
+                    setScheduleRevision((revision) => revision + 1)
+                }
+                await window.graymatter.writeTextFile(
+                    currentPaths.trainingStatus,
+                    serializeTrainingFile(scheduleRef.current),
+                )
+            })
             .catch((err: unknown) => {
                 console.error('Failed to save training status', err)
                 setSaveError('Could not save TrainingStatus.json.')
             })
     }, [])
 
-    const onStatusChange = useCallback((nextStatus: string) => {
-        setStatus(nextStatus)
-    }, [])
-
-    const onTrainingChanged = useCallback(() => {
-        persistTraining()
-        setProgressTick((tick) => tick + 1)
-    }, [persistTraining])
-
-    const beginLesson = useCallback((
-        mode: TrainMode,
-        white: ParsedRepertoire | null,
-        black: ParsedRepertoire | null,
-        opts?: { resetSession?: boolean },
-    ) => {
-        // Read depth from a ref so this callback stays stable: a depth change must not restart
-        // the lesson by itself (see the depth-change effect below).
-        const trainingDepth = trainingDepthRef.current
-        const side = pickActiveSide(mode, white, black, trainingDepth)
-        if (!side) return
-
-        const rep = side === 'w' ? white : black
-        if (!rep || !modeHasPracticeRemaining(mode, white, black, trainingDepth)) {
-            setActiveSide(side)
-            setTargetPath(null)
-            setStatus('All lines practiced. Reset training progress to start over.')
+    /** Jumps to the next card to study, or to the idle start position when nothing is due. */
+    const beginNextCard = useCallback(() => {
+        const picked = pickNextCard(decksForMode(trainMode), scheduleRef.current, {
+            ...pickOptions(),
+            excludeId: currentCardRef.current?.id,
+        })
+        if (!picked) {
+            // Already idle: leave the board alone instead of re-mounting it on every tick.
+            if (!currentCardRef.current && !jumpCardRef.current) return
+            setCurrentCard(null)
+            setJumpCard(null)
+            setSetupPath(null)
+            setLessonKey((key) => key + 1)
             return
         }
-
-        const path = pickRandomPracticePath(rep.root, side, trainingDepth)
-        if (!path) {
-            setActiveSide(side)
-            setTargetPath(null)
-            setStatus('All lines practiced. Reset training progress to start over.')
-            return
-        }
-
-        setActiveSide(side)
-        setTargetPath(path)
-        if (opts?.resetSession) setSessionResetKey((key) => key + 1)
+        const deck = picked.card.side === 'w' ? whiteDeck : blackDeck
+        if (!deck) return
+        const setup = pickSetupPath(deck, picked.card)
+        setActiveSide(picked.card.side)
+        setCurrentCard(null)
+        setJumpCard(picked.card)
+        setSetupPath(setup)
+        // The board reports this line too, but setting it in the same batch avoids a frame
+        // showing the old line beside the new card.
+        setLineSans(setupLineSans(setup))
         setLessonKey((key) => key + 1)
+    }, [blackDeck, decksForMode, trainMode, whiteDeck])
+
+    // Start once the decks and schedule are ready, and again whenever the mode changes.
+    useEffect(() => {
+        if (!ready || !scheduleReady) return
+        beginNextCard()
+    }, [beginNextCard, ready, scheduleReady])
+
+    // A new max depth only interrupts a card that's now too deep; when idle it may unlock cards.
+    useEffect(() => {
+        if (!ready || !scheduleReady) return
+        const current = currentCardRef.current
+        if (!current || current.depth > trainingDepth) beginNextCard()
+        // beginNextCard is left out on purpose: the effect above handles mode changes.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [newPerDay, trainingDepth])
+
+    // Refresh due counts, and pick up cards that come due while idle.
+    const [, setTick] = useState(0)
+    const beginNextCardRef = useRef(beginNextCard)
+    beginNextCardRef.current = beginNextCard
+    useEffect(() => {
+        const id = window.setInterval(() => {
+            setTick((tick) => tick + 1)
+            if (!currentCardRef.current && !jumpCardRef.current) beginNextCardRef.current()
+        }, DRILL_TICK_MS)
+        return () => window.clearInterval(id)
     }, [])
 
-    const onLessonComplete = useCallback(() => {
-        if (targetPathRef.current) setLinesFinished((count) => count + 1)
-        beginLesson(trainMode, whiteRef.current, blackRef.current)
-    }, [beginLesson, trainMode])
+    const onCardShown = useCallback((card: Card) => {
+        setCurrentCard(card)
+        setShowAlternateNotice(false)
+    }, [])
 
-    // Start a fresh line once repertoires are ready, and again whenever the mode changes.
-    useEffect(() => {
-        if (!ready) return
-        beginLesson(trainMode, whiteRef.current, blackRef.current, { resetSession: true })
-    }, [beginLesson, ready, trainMode])
+    const onCardAnswered = useCallback((card: Card, pass: boolean) => {
+        const record = gradeCard(card, scheduleRef.current.get(card.id), pass, new Date())
+        scheduleRef.current.set(card.id, record)
+        setSessionReviews((count) => count + 1)
+        setScheduleRevision((revision) => revision + 1)
+        persistSchedule()
+    }, [persistSchedule])
 
-    // On a depth change, keep the current position unless the trainee has already made as many
-    // moves as the new depth allows; then start a new line.
-    const appliedDepthRef = useRef<number | null>(null)
-    useEffect(() => {
-        if (!ready) return
-        if (appliedDepthRef.current === null || appliedDepthRef.current === trainingDepth) {
-            // First lesson is started by the effect above.
-            appliedDepthRef.current = trainingDepth
-            return
-        }
-        appliedDepthRef.current = trainingDepth
+    const onAlternateBookMove = useCallback(() => {
+        setShowAlternateNotice(true)
+        window.setTimeout(() => setShowAlternateNotice(false), WRONG_MOVE_DISPLAY_MS)
+    }, [])
 
-        const rep = activeSide === 'w' ? whiteRef.current : blackRef.current
-        const current = targetPathRef.current
-        const history = historySansRef.current
-        if (!rep || !current || countPlayerMoves(history, activeSide) >= trainingDepth) {
-            beginLesson(trainMode, whiteRef.current, blackRef.current)
-            return
-        }
-
-        // Continue along a practice line at the new depth that passes through this position. If
-        // none does, nothing is left to practice here at this depth, so move on to a new line.
-        const continuing = collectPracticeTerminalPaths(rep.root, activeSide, trainingDepth)
-            .filter((path) => history.every((san, i) => path[i] === san))
-        if (!continuing.length) {
-            beginLesson(trainMode, whiteRef.current, blackRef.current)
-            return
-        }
-        setTargetPath(continuing[Math.floor(Math.random() * continuing.length)]!)
-    }, [activeSide, beginLesson, ready, trainMode, trainingDepth])
+    const activeDeck = activeSide === 'w' ? whiteDeck : blackDeck
+    const onPickChain = useCallback((positionKey: string, answeredId: string) => {
+        if (!activeDeck) return null
+        const options = { ...pickOptions(), excludeId: answeredId }
+        // Chain into a learning card due soon only when a jump would pick one anyway (nothing
+        // due or new anywhere), so due cards elsewhere aren't held up.
+        const jump = pickNextCard(decksForMode(trainMode), scheduleRef.current, options)
+        return pickChainPath(activeDeck, scheduleRef.current, positionKey, options, jump?.kind === 'ahead')
+    }, [activeDeck, decksForMode, trainMode])
 
     const onTrainModeChange = (mode: TrainMode) => {
         onSettingsChange({ openingsTrainMode: mode })
     }
 
-    const resetTrainingProgress = () => {
-        if (whiteRepertoire) resetNeedsPractice(whiteRepertoire.root)
-        if (blackRepertoire) resetNeedsPractice(blackRepertoire.root)
-        persistTraining()
-        setTrainingRevision((revision) => revision + 1)
-        setLinesFinished(0)
-        beginLesson(trainMode, whiteRepertoire, blackRepertoire, { resetSession: true })
+    const resetSchedule = () => {
+        scheduleRef.current = new Map()
+        persistSchedule({ replace: true })
+        setScheduleRevision((revision) => revision + 1)
+        setSessionReviews(0)
+        setCurrentCard(null)
+        currentCardRef.current = null
+        beginNextCard()
     }
 
+    const loading = !ready || !scheduleReady
+    const stats = deckStats(decksForMode(trainMode), scheduleRef.current, pickOptions())
+    // While a jump's setup moves play out, the panel already shows the card they lead to.
+    const shownCard = currentCard ?? jumpCard
+    const currentRecord = shownCard ? scheduleRef.current.get(shownCard.id) : undefined
     const sideName = activeSide === 'w' ? 'White' : 'Black'
     const sideToMove: Side = lineSans.length % 2 === 0 ? 'w' : 'b'
-    const traineeToMove = sideToMove === activeSide
+    const traineeToMove = !!shownCard && sideToMove === activeSide
     const lineTokens = formatLine(lineSans)
 
     let banner
-    if (!ready) {
-        banner = <StatusBanner tone="info" title={parseError ? 'Repertoires not loaded' : status} />
+    if (loading) {
+        banner = <StatusBanner tone="info" title={parseError ? 'Repertoires not loaded' : 'Loading repertoires…'} />
     }
-    else if (!targetPath) {
-        banner = <StatusBanner tone="success" title="All lines practiced" text="Reset progress to start over" />
+    else if (!shownCard) {
+        banner = stats.total === 0
+            ? <StatusBanner tone="info" title="No cards" text="No moves within the max depth for this repertoire." />
+            : (
+                <StatusBanner
+                    tone="success"
+                    title="All caught up"
+                    text={stats.nextDueMs === null
+                        ? 'No reviews scheduled.'
+                        : `Next review in ${formatWait(stats.nextDueMs - Date.now())}.`}
+                />
+            )
+    }
+    else if (showAlternateNotice) {
+        banner = <StatusBanner tone="info" title="Also in your book" text="Play the other move for this position." />
     }
     else {
         banner = (
             <StatusBanner
-                title={traineeToMove ? 'Your move' : 'Book move'}
+                title={traineeToMove ? (currentRecord ? 'Your move' : 'New move') : 'Book move'}
                 text={`· ${sideName} repertoire`}
                 marker={traineeToMove ? undefined : <SideMarker side={sideToMove} />}
             >
@@ -1027,36 +910,87 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
         )
     }
 
+    let cardScheduleText = ''
+    if (shownCard) {
+        cardScheduleText = currentRecord
+            ? `Next review ${formatWait(Date.parse(currentRecord.due) - Date.now())} · ease ${currentRecord.ease} · lapses ${currentRecord.lapses}`
+            : 'New card'
+    }
+
     return (
         <BoardPage
             label="Openings controls"
             board={(
                 <div className="board-panel">
-                    <TrainerChessboard
-                        root={ready ? (activeRepertoire?.root ?? null) : null}
-                        progressText={progressText}
+                    <CardChessboard
+                        deck={loading ? null : activeDeck}
                         playerSide={activeSide}
-                        targetPath={targetPath}
-                        trainingDepth={trainingDepth}
-                        sessionResetKey={sessionResetKey}
+                        card={jumpCard}
+                        setupPath={setupPath}
                         lessonKey={lessonKey}
-                        trainingRevision={trainingRevision}
                         hintTrigger={hintTrigger}
                         historySansRef={historySansRef}
-                        onStatusChange={onStatusChange}
                         onHistoryChange={setLineSans}
-                        onLessonComplete={onLessonComplete}
-                        onTrainingChanged={onTrainingChanged}
+                        onCardShown={onCardShown}
+                        onCardAnswered={onCardAnswered}
+                        onAlternateBookMove={onAlternateBookMove}
+                        pickChain={onPickChain}
+                        onChainEnd={beginNextCard}
                     />
                 </div>
             )}
+            footer={confirmingReset
+                ? (
+                    <div
+                        role="alertdialog"
+                        aria-label="Confirm reset"
+                        className="flex flex-col gap-2.5 rounded-[10px] border border-danger/35 bg-danger/10 p-3"
+                    >
+                        <span className="text-[13px] text-red-200">Clear the review schedule for every card?</span>
+                        <div className="flex justify-end gap-2">
+                            <Button className="h-8 px-3 text-[13px]" onClick={() => setConfirmingReset(false)}>
+                                Cancel
+                            </Button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setConfirmingReset(false)
+                                    resetSchedule()
+                                }}
+                                className="h-8 rounded-lg bg-red-600 px-3 text-[13px] font-semibold text-white transition hover:bg-red-500"
+                            >
+                                Clear schedule
+                            </button>
+                        </div>
+                    </div>
+                )
+                : (
+                    <div className="flex items-center gap-2">
+                        <Button
+                            className="flex-1"
+                            icon={<LightbulbIcon className="text-success" />}
+                            onClick={() => setHintTrigger((trigger) => trigger + 1)}
+                            disabled={loading || !shownCard}
+                        >
+                            Hint
+                        </Button>
+                        <Button
+                            variant="danger"
+                            icon={<ResetIcon size={15} />}
+                            onClick={() => setConfirmingReset(true)}
+                            disabled={loading}
+                        >
+                            Reset…
+                        </Button>
+                    </div>
+                )}
         >
             <PanelHeader
                 title="Openings"
-                subtitle="Drill your White and Black repertoires."
-                info={'Repertoires load from Google Drive, and progress is saved to TrainingStatus.json '
-                    + 'after each practiced move. Both alternates randomly between the two books. Only '
-                    + 'lines with unpracticed moves for your side are chosen.'}
+                subtitle="Spaced repetition over your repertoire moves."
+                info={'Each of your book moves is a card, keyed by position, so transpositions share one card. '
+                    + 'A correct first try schedules it further out; a wrong move or a hint brings it back soon. '
+                    + 'The schedule is saved to TrainingStatus.json on Google Drive after every answer.'}
             />
 
             {viewSwitch}
@@ -1072,82 +1006,52 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
                 />
             </Section>
 
-            <Section label="Training depth" aside={<ValueBadge>{depthDraft} moves</ValueBadge>}>
+            <Section label="Max depth" aside={<ValueBadge>{depthDraft} moves</ValueBadge>}>
                 <RangeSlider
-                    label="Training depth"
+                    label="Max depth"
                     min={MIN_TRAINING_DEPTH}
                     max={MAX_TRAINING_DEPTH}
                     value={depthDraft}
                     onDraft={setDepthDraft}
-                    onCommit={commitDepth}
+                    onCommit={(value) => {
+                        if (value !== trainingDepth) onSettingsChange({ trainingDepth: value })
+                    }}
                 />
             </Section>
 
-            <Card>
+            <Section label="New cards per day" aside={<ValueBadge>{newPerDayDraft}</ValueBadge>}>
+                <RangeSlider
+                    label="New cards per day"
+                    min={NEW_CARDS_PER_DAY_MIN}
+                    max={NEW_CARDS_PER_DAY_MAX}
+                    value={newPerDayDraft}
+                    onDraft={setNewPerDayDraft}
+                    onCommit={(value) => {
+                        if (value !== newPerDay) onSettingsChange({ openingsNewPerDay: value })
+                    }}
+                />
+            </Section>
+
+            <PanelCard>
                 <div className="flex items-baseline justify-between">
-                    <span className="text-[13px] text-soft">Lines left</span>
-                    <span className="font-mono text-[22px] font-semibold text-ink">{ready ? linesLeft : '–'}</span>
+                    <span className="text-[13px] text-soft">Due now</span>
+                    <span className="font-mono text-[22px] font-semibold text-ink">{loading ? '–' : stats.dueNow}</span>
                 </div>
                 <ProgressBar
-                    label="Lines practiced"
-                    value={linesTotal - linesLeft}
-                    max={linesTotal}
+                    label="Cards learned"
+                    value={stats.learned}
+                    max={stats.total}
                     tone="success"
                 />
                 <div className="grid grid-cols-3 gap-2">
-                    <StatTile label="White" value={trainMode === 'black' ? '–' : whiteLinesLeft} />
-                    <StatTile label="Black" value={trainMode === 'white' ? '–' : blackLinesLeft} />
-                    <StatTile label="Session" value={linesFinished} accent />
+                    <StatTile label="New today" value={loading ? '–' : stats.newLeftToday} />
+                    <StatTile label="Learned" value={loading ? '–' : `${stats.learned}/${stats.total}`} />
+                    <StatTile label="Session" value={sessionReviews} accent />
                 </div>
-            </Card>
+                {cardScheduleText && <div className="font-mono text-[11px] text-faint">{cardScheduleText}</div>}
+            </PanelCard>
 
             {parseError && <ErrorNote>{parseError}</ErrorNote>}
-
-            {confirmingReset
-                ? (
-                    <div
-                        role="alertdialog"
-                        aria-label="Confirm reset"
-                        className="mt-auto flex flex-col gap-2.5 rounded-[10px] border border-danger/35 bg-danger/10 p-3"
-                    >
-                        <span className="text-[13px] text-red-200">Mark every line as unpracticed again?</span>
-                        <div className="flex justify-end gap-2">
-                            <Button className="h-8 px-3 text-[13px]" onClick={() => setConfirmingReset(false)}>
-                                Cancel
-                            </Button>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setConfirmingReset(false)
-                                    resetTrainingProgress()
-                                }}
-                                className="h-8 rounded-lg bg-red-600 px-3 text-[13px] font-semibold text-white transition hover:bg-red-500"
-                            >
-                                Reset progress
-                            </button>
-                        </div>
-                    </div>
-                )
-                : (
-                    <div className="mt-auto flex items-center gap-2">
-                        <Button
-                            className="flex-1"
-                            icon={<LightbulbIcon className="text-success" />}
-                            onClick={() => setHintTrigger((trigger) => trigger + 1)}
-                            disabled={!ready || !targetPath}
-                        >
-                            Hint
-                        </Button>
-                        <Button
-                            variant="danger"
-                            icon={<ResetIcon size={15} />}
-                            onClick={() => setConfirmingReset(true)}
-                            disabled={!ready}
-                        >
-                            Reset…
-                        </Button>
-                    </div>
-                )}
         </BoardPage>
     )
 }

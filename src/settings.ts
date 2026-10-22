@@ -8,9 +8,16 @@ export type PuzzleMode = 'practice' | 'survival'
 export const PUZZLE_RATING_MIN = 300
 export const PUZZLE_RATING_MAX = 3400
 
+/** Bounds of the openings new-cards-per-day slider. */
+export const NEW_CARDS_PER_DAY_MIN = 0
+export const NEW_CARDS_PER_DAY_MAX = 50
+
 export type AppSettings = {
+    /** Max depth (in the trainee's moves) of the opening cards drilled. */
     trainingDepth: number
     openingsTrainMode: TrainMode
+    /** New opening cards introduced per day (across both sides). */
+    openingsNewPerDay: number
     puzzleThemes: PuzzleThemeId[]
     puzzleRatingMin: number
     puzzleRatingMax: number
@@ -22,6 +29,7 @@ export type AppSettings = {
 export const DEFAULT_SETTINGS: AppSettings = {
     trainingDepth: 7,
     openingsTrainMode: 'both',
+    openingsNewPerDay: 10,
     puzzleThemes: [],
     puzzleRatingMin: 1700,
     puzzleRatingMax: 1900,
@@ -54,6 +62,11 @@ export function parseSettingsJson(text: string): AppSettings | { error: string }
         const openingsTrainMode = TRAIN_MODES.includes(o.openingsTrainMode as TrainMode)
             ? o.openingsTrainMode as TrainMode
             : DEFAULT_SETTINGS.openingsTrainMode
+        const newPerDay = Number(o.openingsNewPerDay)
+        const openingsNewPerDay = Number.isInteger(newPerDay)
+            && newPerDay >= NEW_CARDS_PER_DAY_MIN && newPerDay <= NEW_CARDS_PER_DAY_MAX
+            ? newPerDay
+            : DEFAULT_SETTINGS.openingsNewPerDay
         const puzzleThemes = Array.isArray(o.puzzleThemes)
             ? o.puzzleThemes.filter((id): id is PuzzleThemeId => PUZZLE_THEME_IDS.includes(id as string))
             : DEFAULT_SETTINGS.puzzleThemes
@@ -70,6 +83,7 @@ export function parseSettingsJson(text: string): AppSettings | { error: string }
         return {
             trainingDepth,
             openingsTrainMode,
+            openingsNewPerDay,
             puzzleThemes,
             puzzleRatingMin: Math.min(ratingA, ratingB),
             puzzleRatingMax: Math.max(ratingA, ratingB),

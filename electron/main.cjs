@@ -83,11 +83,11 @@ ipcMain.handle('graymatter:fetchSurvivalSet', async (_event, request) => {
 function createWindow() {
     const win = new BrowserWindow({
         // Content size (not including the frame). The board is sized from the window height
-        // (`.board-slot` in index.css): at 666px tall it is 618px, leaving ~322px for the side
+        // (`.board-slot` in index.css): at 859px tall it is 811px, leaving ~362px for the side
         // panel next to the 76px nav rail. The minimums keep at least 18rem for the panel.
         useContentSize: true,
-        width: 1088,
-        height: 666,
+        width: 1321,
+        height: 859,
         minWidth: 900,
         minHeight: 640,
         show: false,

@@ -6,6 +6,9 @@ export const MOVE_ANIMATION_MS = 350
 /** How long a wrong move stays on the board (outlined in red) before it is taken back. */
 export const WRONG_MOVE_DISPLAY_MS = 2000
 
+/** How long the trainee's last correct move stays outlined in green before the drill moves on. */
+export const CORRECT_MOVE_DISPLAY_MS = 2000
+
 /** Square outlines shared by the trainer and puzzle boards. */
 export const SELECTED_SQUARE_STYLE: CSSProperties = { boxShadow: 'inset 0 0 0 4px rgba(245, 158, 11, 0.75)' }
 export const HINT_SQUARE_STYLE: CSSProperties = { boxShadow: 'inset 0 0 0 4px rgba(34, 197, 94, 0.85)' }

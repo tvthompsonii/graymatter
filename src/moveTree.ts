@@ -7,7 +7,6 @@ export type Node = {
     fen: string
     /** SAN played from the parent position; empty at the start position. */
     moveFromPrevious: string
-    needsPractice: boolean
     children: Map<string, Node>
 }
 
@@ -29,7 +28,6 @@ export function newTreeRoot(): Node {
     return {
         fen: new Chess().fen(),
         moveFromPrevious: '',
-        needsPractice: true,
         children: new Map(),
     }
 }
@@ -46,7 +44,6 @@ export function insertPath(root: Node, sans: Iterable<string>): void {
             c = {
                 fen: g.fen(),
                 moveFromPrevious: san,
-                needsPractice: true,
                 children: new Map(),
             }
             n.children.set(san, c)
@@ -124,14 +121,6 @@ export function forEachNodeDepthFirst(root: Node, fn: (n: Node, pathSans: readon
     dfs(root, [])
 }
 
-// Clears practice flags for a fresh session while keeping the same shape of the tree.
-// Arguments: root — trie root whose every node will get needsPractice = true.
-export function resetNeedsPractice(root: Node): void {
-    forEachNodeDepthFirst(root, (n) => {
-        n.needsPractice = true
-    })
-}
-
 /** True when this ply index is a move the trainee plays (0 = White's first move). */
 export function isPlayerPly(playerSide: 'w' | 'b', plyIndex: number): boolean {
     return playerSide === 'w' ? plyIndex % 2 === 0 : plyIndex % 2 === 1
@@ -149,123 +138,6 @@ export function countPlayerMoves(
     return count
 }
 
-/** Keep plies through the trainee's Nth move (inclusive). */
-export function truncatePathToTrainingDepth(
-    path: readonly string[],
-    playerSide: 'w' | 'b',
-    trainingDepth: number,
-): string[] {
-    const depth = Math.max(1, trainingDepth)
-    let playerMoves = 0
-    const out: string[] = []
-    for (let i = 0; i < path.length; i++) {
-        out.push(path[i]!)
-        if (isPlayerPly(playerSide, i)) {
-            playerMoves++
-            if (playerMoves >= depth) break
-        }
-    }
-    return out
-}
-
-/**
- * Practice drill paths truncated to trainingDepth player moves.
- * A line is included when any of those player moves still needs practice.
- */
-export function collectPracticeTerminalPaths(
-    root: Node,
-    playerSide: 'w' | 'b',
-    trainingDepth: number,
-): string[][] {
-    return collectTerminalPaths(root, playerSide, trainingDepth, true)
-}
-
-/** Every drill path at trainingDepth, practiced or not (the total that lines left counts down from). */
-export function collectAllTerminalPaths(
-    root: Node,
-    playerSide: 'w' | 'b',
-    trainingDepth: number,
-): string[][] {
-    return collectTerminalPaths(root, playerSide, trainingDepth, false)
-}
-
-function collectTerminalPaths(
-    root: Node,
-    playerSide: 'w' | 'b',
-    trainingDepth: number,
-    onlyNeedingPractice: boolean,
-): string[][] {
-    const depth = Math.max(1, trainingDepth)
-    const byKey = new Map<string, string[]>()
-
-    function dfs(
-        n: Node,
-        pathSans: string[],
-        anyPlayerNeeds: boolean,
-        playerMoveCount: number,
-    ): void {
-        const reachedDepth = playerMoveCount >= depth
-        if (n.children.size === 0 || reachedDepth) {
-            if (pathSans.length > 0 && (anyPlayerNeeds || !onlyNeedingPractice)) {
-                const truncated = truncatePathToTrainingDepth(pathSans, playerSide, depth)
-                byKey.set(canonicalPathKey(truncated), truncated)
-            }
-            return
-        }
-
-        for (const san of [...n.children.keys()].sort()) {
-            const child = n.children.get(san)
-            if (!child) continue
-            const plyIndex = pathSans.length
-            const isPlayer = isPlayerPly(playerSide, plyIndex)
-            const nextPlayerCount = playerMoveCount + (isPlayer ? 1 : 0)
-            const playerNeeds =
-                anyPlayerNeeds || (isPlayer && child.needsPractice)
-            dfs(child, [...pathSans, san], playerNeeds, nextPlayerCount)
-        }
-    }
-
-    dfs(root, [], false, 0)
-    return [...byKey.values()]
-}
-
-/**
- * True when a trainee move at or after ply `fromPly` along `path` still needs practice,
- * i.e. the trainee still has a move of their own to make in this drill line.
- */
-export function pathHasPracticeAhead(
-    root: Node,
-    path: readonly string[],
-    fromPly: number,
-    playerSide: 'w' | 'b',
-): boolean {
-    let node: Node | undefined = root
-    for (let i = 0; i < path.length; i++) {
-        node = node.children.get(path[i]!)
-        if (!node) return false
-        if (i >= fromPly && isPlayerPly(playerSide, i) && node.needsPractice) return true
-    }
-    return false
-}
-
-export function pickRandomPracticePath(
-    root: Node,
-    playerSide: 'w' | 'b',
-    trainingDepth: number,
-): string[] | null {
-    const paths = collectPracticeTerminalPaths(root, playerSide, trainingDepth)
-    if (!paths.length) return null
-    return paths[Math.floor(Math.random() * paths.length)]!
-}
-
-export function treeHasPracticeRemaining(
-    root: Node,
-    playerSide: 'w' | 'b',
-    trainingDepth: number,
-): boolean {
-    return collectPracticeTerminalPaths(root, playerSide, trainingDepth).length > 0
-}
-
 // Prints the whole repertoire to the browser console after PGN import to verify structure and path keys.
 // Arguments: root — trie root to dump.
 export function logRepertoireTreeDfs(root: Node): void {
@@ -277,7 +149,7 @@ export function logRepertoireTreeDfs(root: Node): void {
         const pk = canonicalPathKey(pathSans)
         const fenShort = n.fen.split(/\s+/).slice(0, 4).join(' ')
         console.log(
-            `${indent}${label}  pathKey=${pk}  fen=${fenShort}  needsPractice=${n.needsPractice}  branches=${n.children.size}`,
+            `${indent}${label}  pathKey=${pk}  fen=${fenShort}  branches=${n.children.size}`,
         )
     })
     console.log('[end repertoire tree DFS]')
