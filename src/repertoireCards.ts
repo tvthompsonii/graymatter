@@ -136,8 +136,30 @@ export function buildCardDeck(root: Node, side: 'w' | 'b'): CardDeck {
     return { side, positions, cards, cardsAt }
 }
 
-/** A random route from the start position to this card's position (empty for White's first move). */
-export function pickSetupPath(deck: CardDeck, card: Card): string[] {
+/**
+ * A route from the start position to this card's position (empty for White's first move):
+ * random among the routes passing the fewest of the trainee's cards that `isLearning`, so
+ * setup shows as few still-being-learned answers as possible.
+ */
+export function pickSetupPath(deck: CardDeck, card: Card, isLearning: (id: string) => boolean): string[] {
     const paths = deck.positions.get(card.posKey)?.reachPaths ?? [[]]
-    return [...paths[Math.floor(Math.random() * paths.length)]!]
+    if (paths.length === 1) return [...paths[0]!]
+    let fewest = Infinity
+    let best: string[][] = []
+    for (const path of paths) {
+        const game = new Chess()
+        let learning = 0
+        for (const san of path) {
+            const key = fenSig(game.fen())
+            const isTrainee = game.turn() === deck.side
+            const move = game.move(san, { strict: false })
+            if (isTrainee && isLearning(cardId(key, `${move.from}${move.to}${move.promotion ?? ''}`))) learning++
+        }
+        if (learning < fewest) {
+            fewest = learning
+            best = []
+        }
+        if (learning === fewest) best.push(path)
+    }
+    return [...best[Math.floor(Math.random() * best.length)]!]
 }

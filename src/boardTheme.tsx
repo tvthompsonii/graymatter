@@ -12,6 +12,9 @@ export const CORRECT_MOVE_DISPLAY_MS = 2000
 /** Square outlines shared by the trainer and puzzle boards. */
 export const SELECTED_SQUARE_STYLE: CSSProperties = { boxShadow: 'inset 0 0 0 4px rgba(245, 158, 11, 0.75)' }
 export const HINT_SQUARE_STYLE: CSSProperties = { boxShadow: 'inset 0 0 0 4px rgba(34, 197, 94, 0.85)' }
+/** Arrow showing the answer the first time a new opening card comes up. */
+export const SOLUTION_ARROW_COLOR = 'rgba(34, 197, 94, 0.85)'
+
 export const WRONG_SQUARE_STYLE: CSSProperties = { boxShadow: 'inset 0 0 0 4px rgba(239, 68, 68, 0.9)' }
 
 /**

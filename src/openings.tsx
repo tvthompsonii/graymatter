@@ -3,6 +3,7 @@ import { Chess, type Move } from 'chess.js'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Chessboard } from 'react-chessboard'
 import type {
+    Arrow,
     PieceDropHandlerArgs,
     PieceHandlerArgs,
     SquareHandlerArgs,
@@ -15,6 +16,7 @@ import {
     HINT_SQUARE_STYLE,
     MOVE_ANIMATION_MS,
     SELECTED_SQUARE_STYLE,
+    SOLUTION_ARROW_COLOR,
     withSquareOutlines,
     WRONG_MOVE_DISPLAY_MS,
     WRONG_SQUARE_STYLE,
@@ -28,7 +30,9 @@ import { NEW_CARDS_PER_DAY_MAX, NEW_CARDS_PER_DAY_MIN, type AppSettings, type Tr
 import {
     deckStats,
     formatWait,
+    CHAIN_MAX_NEW,
     gradeCard,
+    missPracticeCard,
     pickChainPath,
     pickNextCard,
     type ChainPick,
@@ -68,13 +72,15 @@ export type CardChessboardProps = {
     historySansRef: { current: string[] }
     /** Called with a copy of historySansRef whenever the position changes. */
     onHistoryChange?: (sans: string[]) => void
-    /** The card now waiting for the trainee (after a jump or a chained reply). */
-    onCardShown: (card: Card) => void
+    /** The card now waiting for the trainee (after a jump or a chained reply); `practice` when it isn't graded. */
+    onCardShown: (card: Card, practice: boolean) => void
+    /** True for a card never reviewed: its first showing draws the answer as an arrow. */
+    isNewCard: (card: Card) => boolean
     /** Called once per showing: on the first wrong move or hint (fail), or the correct move (pass). */
-    onCardAnswered: (card: Card, pass: boolean) => void
+    onCardAnswered: (card: Card, pass: boolean, practice: boolean) => void
     /** The trainee played a different book move for this position; taken back with no penalty. */
     onAlternateBookMove: () => void
-    /** Book moves from this position (after the trainee's correct answer to `answeredId`) to the next card worth testing now. */
+    /** Opponent replies from this position (after the trainee's correct answer to `answeredId`) to the chain's next card. */
     pickChain: (positionKey: string, answeredId: string) => ChainPick | null
     /** The chain ended (no continuation leads to a card to test); the page jumps to the next card. */
     onChainEnd: () => void
@@ -176,6 +182,7 @@ export function CardChessboard({
     historySansRef,
     onHistoryChange,
     onCardShown,
+    isNewCard,
     onCardAnswered,
     onAlternateBookMove,
     pickChain,
@@ -192,6 +199,8 @@ export function CardChessboard({
     const currentCardRef = useRef<Card | null>(null)
     /** True once the current card has been graded this showing. */
     const gradedRef = useRef(false)
+    /** The current card is a practice move (a review card that isn't due). */
+    const practiceRef = useRef(false)
     // True while a wrong move is displayed; blocks input until it is taken back.
     const showingWrongMoveRef = useRef(false)
 
@@ -202,9 +211,12 @@ export function CardChessboard({
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({});
     const [hintSquare, setHintSquare] = useState<string | null>(null)
     const [wrongSquare, setWrongSquare] = useState<string | null>(null)
+    /** The answer arrow while a new card is being introduced; wrong moves and Hint don't grade it. */
+    const [solutionArrow, setSolutionArrow] = useState<Arrow | null>(null)
+    const introducingRef = useRef(false)
 
-    const callbacksRef = useRef({ onCardShown, onCardAnswered, onAlternateBookMove, pickChain, onChainEnd })
-    callbacksRef.current = { onCardShown, onCardAnswered, onAlternateBookMove, pickChain, onChainEnd }
+    const callbacksRef = useRef({ onCardShown, isNewCard, onCardAnswered, onAlternateBookMove, pickChain, onChainEnd })
+    callbacksRef.current = { onCardShown, isNewCard, onCardAnswered, onAlternateBookMove, pickChain, onChainEnd }
 
     // True while a jump's setup moves are being played; the full line was already reported.
     const settingUpRef = useRef(false)
@@ -232,17 +244,22 @@ export function CardChessboard({
         }
     }, [historySansRef])
 
-    const showCard = useCallback((next: Card) => {
+    const showCard = useCallback((next: Card, practice: boolean) => {
         currentCardRef.current = next
         gradedRef.current = false
-        callbacksRef.current.onCardShown(next)
+        practiceRef.current = practice
+        introducingRef.current = callbacksRef.current.isNewCard(next)
+        setSolutionArrow(introducingRef.current
+            ? { startSquare: next.uci.slice(0, 2), endSquare: next.uci.slice(2, 4), color: SOLUTION_ARROW_COLOR }
+            : null)
+        callbacksRef.current.onCardShown(next, practice)
     }, [])
 
     const grade = useCallback((pass: boolean) => {
         const current = currentCardRef.current
         if (!current || gradedRef.current) return
         gradedRef.current = true
-        callbacksRef.current.onCardAnswered(current, pass)
+        callbacksRef.current.onCardAnswered(current, pass, practiceRef.current)
     }, [])
 
     /** Hint pressed while setup moves were still playing; shown once the card is up. */
@@ -250,7 +267,8 @@ export function CardChessboard({
 
     const showHint = useCallback(() => {
         const current = currentCardRef.current
-        if (!current) return
+        // A new card's answer is already drawn.
+        if (!current || introducingRef.current) return
         grade(false)
         setHintSquare(current.uci.slice(0, 2))
     }, [grade])
@@ -264,6 +282,8 @@ export function CardChessboard({
         currentCardRef.current = null
         pendingHintRef.current = false
         showingWrongMoveRef.current = false
+        introducingRef.current = false
+        setSolutionArrow(null)
         setSelectedSquare(null)
         setOptionSquares({})
         setHintSquare(null)
@@ -290,7 +310,7 @@ export function CardChessboard({
             }
             if (runId !== runIdRef.current) return
             settingUpRef.current = false
-            showCard(target)
+            showCard(target, false)
             if (pendingHintRef.current) {
                 pendingHintRef.current = false
                 showHint()
@@ -346,7 +366,7 @@ export function CardChessboard({
                 .map((c) => c.san)
             if (findMatchingOutcome(game, from, to, otherBookSans))
                 callbacksRef.current.onAlternateBookMove()
-            else
+            else if (!introducingRef.current)
                 grade(false)
 
             showingWrongMoveRef.current = true
@@ -370,6 +390,8 @@ export function CardChessboard({
 
         grade(true)
         currentCardRef.current = null
+        introducingRef.current = false
+        setSolutionArrow(null)
         historySansRef.current.push(move.san)
         setSelectedSquare(null)
         setHintSquare(null)
@@ -396,7 +418,7 @@ export function CardChessboard({
                 if (runId !== runIdRef.current) return
                 if (!(await applyBookMove(san, runId))) return
             }
-            if (runId === runIdRef.current) showCard(chain.card)
+            if (runId === runIdRef.current) showCard(chain.card, chain.practice)
         })()
         return true
     }, [applyBookMove, deck, grade, historySansRef, playerSide, showCard])
@@ -495,6 +517,7 @@ export function CardChessboard({
                 onPieceDrop,
                 onSquareClick,
                 squareStyles: highlights,
+                arrows: solutionArrow && !wrongSquare ? [solutionArrow] : [],
                 ...boardChrome,
             }}
         />
@@ -657,6 +680,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     const [setupPath, setSetupPath] = useState<string[] | null>(null)
     const [lessonKey, setLessonKey] = useState(0)
     const [currentCard, setCurrentCard] = useState<Card | null>(null)
+    const [currentIsPractice, setCurrentIsPractice] = useState(false)
     const [scheduleReady, setScheduleReady] = useState(false)
     // The schedule is mutated in place; bump this to re-render the counts.
     const [, setScheduleRevision] = useState(0)
@@ -669,7 +693,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
 
     const trainingDepth = Math.min(
         MAX_TRAINING_DEPTH,
-        Math.max(MIN_TRAINING_DEPTH, settings.trainingDepth),
+        Math.max(MIN_TRAINING_DEPTH, settings.openingsTrainDepth),
     )
 
     // Dragging a slider only moves its draft; the value is saved when the thumb is released.
@@ -706,6 +730,9 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     pathsRef.current = paths
     currentCardRef.current = currentCard
     jumpCardRef.current = jumpCard
+    // The running chain (since the last jump): new cards shown and positions passed through.
+    const chainNewCountRef = useRef(0)
+    const chainVisitedRef = useRef(new Set<string>())
 
     // Settings read inside stable callbacks, so changing them doesn't restart the current card.
     const pickOptionsRef = useRef<Omit<PickOptions, 'now'>>({ maxDepth: trainingDepth, newPerDay })
@@ -779,7 +806,12 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
         }
         const deck = picked.card.side === 'w' ? whiteDeck : blackDeck
         if (!deck) return
-        const setup = pickSetupPath(deck, picked.card)
+        const setup = pickSetupPath(deck, picked.card, (id) => {
+            const r = scheduleRef.current.get(id)
+            return !!r && r.state !== 'review'
+        })
+        chainNewCountRef.current = 0
+        chainVisitedRef.current = new Set()
         setActiveSide(picked.card.side)
         setCurrentCard(null)
         setJumpCard(picked.card)
@@ -817,18 +849,30 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
         return () => window.clearInterval(id)
     }, [])
 
-    const onCardShown = useCallback((card: Card) => {
+    const onCardShown = useCallback((card: Card, practice: boolean) => {
+        if (!scheduleRef.current.has(card.id)) chainNewCountRef.current++
+        chainVisitedRef.current.add(card.posKey)
         setCurrentCard(card)
+        setCurrentIsPractice(practice)
         setShowAlternateNotice(false)
     }, [])
 
-    const onCardAnswered = useCallback((card: Card, pass: boolean) => {
-        const record = gradeCard(card, scheduleRef.current.get(card.id), pass, new Date())
-        scheduleRef.current.set(card.id, record)
-        setSessionReviews((count) => count + 1)
+    const onCardAnswered = useCallback((card: Card, pass: boolean, practice: boolean) => {
+        const previous = scheduleRef.current.get(card.id)
+        if (practice) {
+            // A correct practice move leaves the schedule alone; only a miss counts.
+            if (pass || !previous) return
+            scheduleRef.current.set(card.id, missPracticeCard(card, previous, new Date()))
+        }
+        else {
+            scheduleRef.current.set(card.id, gradeCard(card, previous, pass, new Date()))
+            setSessionReviews((count) => count + 1)
+        }
         setScheduleRevision((revision) => revision + 1)
         persistSchedule()
     }, [persistSchedule])
+
+    const isNewCard = useCallback((card: Card) => !scheduleRef.current.has(card.id), [])
 
     const onAlternateBookMove = useCallback(() => {
         setShowAlternateNotice(true)
@@ -839,10 +883,16 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     const onPickChain = useCallback((positionKey: string, answeredId: string) => {
         if (!activeDeck) return null
         const options = { ...pickOptions(), excludeId: answeredId }
+        chainVisitedRef.current.add(positionKey)
         // Chain into a learning card due soon only when a jump would pick one anyway (nothing
         // due or new anywhere), so due cards elsewhere aren't held up.
         const jump = pickNextCard(decksForMode(trainMode), scheduleRef.current, options)
-        return pickChainPath(activeDeck, scheduleRef.current, positionKey, options, jump?.kind === 'ahead')
+        return pickChainPath(activeDeck, scheduleRef.current, positionKey, {
+            ...options,
+            allowAhead: jump?.kind === 'ahead',
+            newLeft: CHAIN_MAX_NEW - chainNewCountRef.current,
+            visited: chainVisitedRef.current,
+        })
     }, [activeDeck, decksForMode, trainMode])
 
     const onTrainModeChange = (mode: TrainMode) => {
@@ -867,6 +917,8 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     const sideName = activeSide === 'w' ? 'White' : 'Black'
     const sideToMove: Side = lineSans.length % 2 === 0 ? 'w' : 'b'
     const traineeToMove = !!shownCard && sideToMove === activeSide
+    // Only a chained card can be practice, and only once it's waiting for the trainee.
+    const practicing = !!currentCard && currentIsPractice
     const lineTokens = formatLine(lineSans)
 
     let banner
@@ -892,8 +944,8 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     else {
         banner = (
             <StatusBanner
-                title={traineeToMove ? (currentRecord ? 'Your move' : 'New move') : 'Book move'}
-                text={`· ${sideName} repertoire`}
+                title={traineeToMove ? (practicing ? 'Practice' : currentRecord ? 'Your move' : 'New move') : 'Book move'}
+                text={`· ${sideName} repertoire${traineeToMove && practicing ? ' · not graded' : ''}`}
                 marker={traineeToMove ? undefined : <SideMarker side={sideToMove} />}
             >
                 <div className="font-mono text-xs text-soft">
@@ -913,8 +965,8 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     let cardScheduleText = ''
     if (shownCard) {
         cardScheduleText = currentRecord
-            ? `Next review ${formatWait(Date.parse(currentRecord.due) - Date.now())} · ease ${currentRecord.ease} · lapses ${currentRecord.lapses}`
-            : 'New card'
+            ? `${practicing ? 'Practice · ' : ''}Next review ${formatWait(Date.parse(currentRecord.due) - Date.now())} · ease ${currentRecord.ease} · lapses ${currentRecord.lapses}`
+            : 'New card · play the arrow'
     }
 
     return (
@@ -932,6 +984,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
                         historySansRef={historySansRef}
                         onHistoryChange={setLineSans}
                         onCardShown={onCardShown}
+                        isNewCard={isNewCard}
                         onCardAnswered={onCardAnswered}
                         onAlternateBookMove={onAlternateBookMove}
                         pickChain={onPickChain}
@@ -970,7 +1023,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
                             className="flex-1"
                             icon={<LightbulbIcon className="text-success" />}
                             onClick={() => setHintTrigger((trigger) => trigger + 1)}
-                            disabled={loading || !shownCard}
+                            disabled={loading || !shownCard || !currentRecord}
                         >
                             Hint
                         </Button>
@@ -1014,7 +1067,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
                     value={depthDraft}
                     onDraft={setDepthDraft}
                     onCommit={(value) => {
-                        if (value !== trainingDepth) onSettingsChange({ trainingDepth: value })
+                        if (value !== trainingDepth) onSettingsChange({ openingsTrainDepth: value })
                     }}
                 />
             </Section>

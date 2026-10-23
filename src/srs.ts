@@ -111,6 +111,24 @@ export function gradeCard(card: Card, previous: ReviewRecord | undefined, pass: 
     return r
 }
 
+/**
+ * A missed practice move (a review card played before it was due): relearn it with a halved
+ * interval. Ease is kept, since the card wasn't due yet.
+ */
+export function missPracticeCard(card: Card, previous: ReviewRecord, now: Date): ReviewRecord {
+    return {
+        ...previous,
+        san: card.san,
+        line: card.line,
+        state: 'relearning',
+        step: 0,
+        lapses: previous.lapses + 1,
+        intervalDays: roundDays(Math.max(1, previous.intervalDays * 0.5)),
+        due: new Date(now.getTime() + RELEARNING_STEPS_MIN[0]! * MINUTE_MS).toISOString(),
+        lastReviewed: now.toISOString(),
+    }
+}
+
 export type PickOptions = {
     now: Date
     maxDepth: number
@@ -177,78 +195,110 @@ export function pickNextCard(
     return null
 }
 
-/** Book moves to play from the current position (opponent replies and any not-due trainee moves) to reach `card`. */
-export type ChainPick = { sans: string[]; card: Card }
+/** Most new cards one chain may introduce, counting the card the chain started from. */
+export const CHAIN_MAX_NEW = 3
 
 /**
- * After the trainee's move, the book continuation to the nearest card worth testing now, so the
- * drill keeps playing the line instead of jumping. The trainee's own moves along the way whose
- * cards aren't due are auto-played. The nearest testable card wins: due, new (within today's
- * cap), or, only with `allowAhead` (when a jump would pick one too), a learning card due soon;
- * at equal distance due beats new. Null ends the chain.
+ * The next stop of a chain: the opponent replies to play (usually one), then a card for the
+ * trainee. A practice card is a review card that isn't due: played for context, and only a
+ * miss affects its schedule.
+ */
+export type ChainPick = { sans: string[]; card: Card; practice: boolean }
+
+export type ChainOptions = PickOptions & {
+    /** Learning cards due soon count as tests (only when a jump would pick one too). */
+    allowAhead: boolean
+    /** New cards this chain may still introduce. */
+    newLeft: number
+    /** Positions this chain has already been through. */
+    visited: ReadonlySet<string>
+}
+
+/**
+ * After the trainee's move, the next stop along the book. Breadth-first through the opponent's
+ * replies and the trainee's practice cards to the nearest card to test: due, new (within
+ * today's cap and the chain's `newLeft`), or with `allowAhead` a learning card due soon; at
+ * equal distance due beats new beats ahead. Returns the first stop on the way there, which is
+ * a practice card when the test is further on. With nothing to test, practice continues down
+ * a random line. A learning card that isn't due, a new card past the cap, Max depth or a leaf
+ * ends that line, so the chain never shows a move the trainee is still learning. Null ends the
+ * chain.
  */
 export function pickChainPath(
     deck: CardDeck,
     schedule: Schedule,
     positionKey: string,
-    { now, maxDepth, newPerDay, excludeId }: PickOptions,
-    allowAhead: boolean,
+    { now, maxDepth, newPerDay, excludeId, allowAhead, newLeft, visited: chainVisited }: ChainOptions,
 ): ChainPick | null {
     const nowMs = now.getTime()
-    const newAllowed = introducedToday(schedule, now) < newPerDay
+    const newAllowed = newLeft > 0 && introducedToday(schedule, now) < newPerDay
 
-    // 0 = due, 1 = new, 2 = learning and due soon; null = not worth testing now.
-    const tierOf = (card: Card): number | null => {
+    // 0 = due, 1 = new, 2 = learning and due soon, 'practice' = review card not due, null = stop.
+    const classify = (card: Card): number | 'practice' | null => {
         if (card.depth > maxDepth || card.id === excludeId) return null
         const r = schedule.get(card.id)
         if (!r) return newAllowed ? 1 : null
         const dueMs = dueMsOf(r)
         if (dueMs <= nowMs) return 0
-        if (allowAhead && r.state !== 'review' && dueMs <= nowMs + LEARN_AHEAD_MS) return 2
+        if (r.state === 'review') return 'practice'
+        if (allowAhead && dueMs <= nowMs + LEARN_AHEAD_MS) return 2
         return null
     }
 
-    let best: { tier: number; length: number; picks: ChainPick[] } | null = null
-    const visited = new Set<string>([positionKey])
-    const queue: { key: string; sans: string[] }[] = [{ key: positionKey, sans: [] }]
+    let best: { tier: number; plies: number; picks: ChainPick[] } | null = null
+    // First stops that are practice cards, used when no test is reachable.
+    const practiceSteps: ChainPick[] = []
+    const visited = new Set<string>([...chainVisited, positionKey])
+    // `first` is the chain's next stop on the way here; `sans` the replies before it.
+    type Entry = { key: string; plies: number; sans: string[]; first: ChainPick | null }
+    const queue: Entry[] = [{ key: positionKey, plies: 0, sans: [], first: null }]
     while (queue.length) {
-        const { key, sans } = queue.shift()!
-        // Breadth-first, so once a pick is found nothing longer can tie with it.
-        if (best && sans.length > best.length) break
+        const { key, plies, sans, first } = queue.shift()!
+        // Breadth-first, so once a test is found nothing longer can tie with it.
+        if (best && plies > best.plies) break
         const pos = deck.positions.get(key)
         if (!pos) continue
 
-        const next: { san: string; toKey: string }[] = []
-        if (pos.sideToMove === deck.side && sans.length > 0) {
+        const next: { toKey: string; san: string; first: ChainPick | null }[] = []
+        if (pos.sideToMove === deck.side && plies > 0) {
             const here = deck.cardsAt.get(key) ?? []
-            let found = false
-            for (const card of here) {
-                const tier = tierOf(card)
-                if (tier === null) continue
-                found = true
-                if (!best || tier < best.tier) best = { tier, length: sans.length, picks: [] }
-                if (tier === best.tier) best.picks.push({ sans, card })
+            const kinds = here.map(classify)
+            const tests = here.filter((_, i) => typeof kinds[i] === 'number')
+            if (tests.length) {
+                for (const card of tests) {
+                    const tier = kinds[here.indexOf(card)] as number
+                    if (!best || tier < best.tier) best = { tier, plies, picks: [] }
+                    if (tier === best.tier) best.picks.push(first ?? { sans, card, practice: false })
+                }
+                continue
             }
-            // Stop this branch at a card to test; otherwise auto-play the trainee's book moves.
-            if (found) continue
-            for (const card of here) {
+            for (const [i, card] of here.entries()) {
+                if (kinds[i] !== 'practice') continue
+                const step = first ?? { sans, card, practice: true }
+                if (!first) practiceSteps.push(step)
                 const edge = pos.edges.get(card.uci)
-                if (edge && card.depth <= maxDepth) next.push(edge)
+                if (edge) next.push({ toKey: edge.toKey, san: edge.san, first: step })
             }
         }
         else if (pos.sideToMove !== deck.side) {
-            next.push(...pos.edges.values())
+            for (const edge of pos.edges.values()) next.push({ toKey: edge.toKey, san: edge.san, first })
         }
 
         for (const edge of next) {
             if (visited.has(edge.toKey)) continue
             visited.add(edge.toKey)
-            queue.push({ key: edge.toKey, sans: [...sans, edge.san] })
+            queue.push({
+                key: edge.toKey,
+                plies: plies + 1,
+                sans: edge.first ? sans : [...sans, edge.san],
+                first: edge.first,
+            })
         }
     }
 
-    if (!best) return null
-    return best.picks[Math.floor(Math.random() * best.picks.length)]!
+    const picks = best?.picks ?? practiceSteps
+    if (!picks.length) return null
+    return picks[Math.floor(Math.random() * picks.length)]!
 }
 
 export type DeckStats = {

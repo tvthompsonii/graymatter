@@ -14,7 +14,7 @@ export const NEW_CARDS_PER_DAY_MAX = 50
 
 export type AppSettings = {
     /** Max depth (in the trainee's moves) of the opening cards drilled. */
-    trainingDepth: number
+    openingsTrainDepth: number
     openingsTrainMode: TrainMode
     /** New opening cards introduced per day (across both sides). */
     openingsNewPerDay: number
@@ -27,7 +27,7 @@ export type AppSettings = {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-    trainingDepth: 7,
+    openingsTrainDepth: 7,
     openingsTrainMode: 'both',
     openingsNewPerDay: 10,
     puzzleThemes: [],
@@ -52,12 +52,12 @@ export function parseSettingsJson(text: string): AppSettings | { error: string }
         const raw = JSON.parse(text) as unknown
         if (!raw || typeof raw !== 'object') return { error: 'Invalid settings JSON.' }
         const o = raw as Partial<Record<keyof AppSettings, unknown>>
-        const trainingDepth = Number(o.trainingDepth)
-        if (!Number.isFinite(trainingDepth) || trainingDepth < 1 || !Number.isInteger(trainingDepth)) {
-            return { error: 'trainingDepth must be a positive integer.' }
+        const openingsTrainDepth = Number(o.openingsTrainDepth)
+        if (!Number.isFinite(openingsTrainDepth) || openingsTrainDepth < 1 || !Number.isInteger(openingsTrainDepth)) {
+            return { error: 'openingsTrainDepth must be a positive integer.' }
         }
 
-        // Fields added after trainingDepth fall back to their defaults when missing or invalid,
+        // Fields added after openingsTrainDepth fall back to their defaults when missing or invalid,
         // so older settings files keep working instead of being reset.
         const openingsTrainMode = TRAIN_MODES.includes(o.openingsTrainMode as TrainMode)
             ? o.openingsTrainMode as TrainMode
@@ -81,7 +81,7 @@ export function parseSettingsJson(text: string): AppSettings | { error: string }
             : DEFAULT_SETTINGS.puzzleSurvivalBest
 
         return {
-            trainingDepth,
+            openingsTrainDepth,
             openingsTrainMode,
             openingsNewPerDay,
             puzzleThemes,
