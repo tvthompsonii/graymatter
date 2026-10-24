@@ -46,6 +46,8 @@ function parseRecord(raw: unknown): ReviewRecord | null {
         step: isFiniteNumber(o.step) ? o.step : 0,
         introduced: typeof o.introduced === 'string' ? o.introduced : o.lastReviewed.slice(0, 10),
         lastReviewed: o.lastReviewed,
+        attempts: isFiniteNumber(o.attempts) ? o.attempts : 0,
+        correct: isFiniteNumber(o.correct) ? o.correct : 0,
     }
 }
 
@@ -70,6 +72,16 @@ export function parseTrainingFileJson(text: string): Schedule {
         // Not JSON: start with an empty schedule.
     }
     return schedule
+}
+
+/** Reads TrainingStatus.json; a missing or unreadable file is an empty schedule. */
+export async function readSchedule(path: string): Promise<Schedule> {
+    try {
+        return parseTrainingFileJson(await window.graymatter.readTextFile(path))
+    }
+    catch {
+        return new Map()
+    }
 }
 
 export function serializeTrainingFile(schedule: Schedule): string {

@@ -12,6 +12,7 @@ import {
     boardChrome,
     customPieces,
     HINT_SQUARE_STYLE,
+    LEGAL_TARGET_STYLE,
     MOVE_ANIMATION_MS,
     SELECTED_SQUARE_STYLE,
     withSquareOutlines,
@@ -271,6 +272,7 @@ export function PuzzleChessboard({
             const target = gameRef.current.get(move.to)
             const source = gameRef.current.get(square)
             newSquares[move.to] = {
+                ...LEGAL_TARGET_STYLE,
                 background: target && target.color !== source?.color
                     ? 'radial-gradient(circle, transparent 70%, rgba(0,0,0,.1) 70%)'
                     : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)',
@@ -419,10 +421,10 @@ export function PuzzleChessboard({
         {
             ...optionSquares,
             ...(lastMoveSquares.from && {
-                [lastMoveSquares.from]: { backgroundColor: 'rgba(179, 197, 18, 0.4)' },
+                [lastMoveSquares.from]: { backgroundColor: 'rgba(179, 197, 18, 0.4)', ...(optionSquares[lastMoveSquares.from] && LEGAL_TARGET_STYLE) },
             }),
             ...(lastMoveSquares.to && {
-                [lastMoveSquares.to]: { backgroundColor: 'rgba(179, 197, 18, 0.4)' },
+                [lastMoveSquares.to]: { backgroundColor: 'rgba(179, 197, 18, 0.4)', ...(optionSquares[lastMoveSquares.to] && LEGAL_TARGET_STYLE) },
             }),
         },
         [

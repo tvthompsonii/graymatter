@@ -8,7 +8,7 @@ import type {
     SquareHandlerArgs,
 } from 'react-chessboard'
 
-import { boardChrome, customPieces, MOVE_ANIMATION_MS } from './boardTheme'
+import { boardChrome, customPieces, LEGAL_TARGET_STYLE, MOVE_ANIMATION_MS } from './boardTheme'
 import { Button } from './ui/controls'
 import { BotIcon, PlusIcon } from './ui/icons'
 import { BoardPage, Card, PanelHeader, Section, SideMarker, StatusBanner } from './ui/layout'
@@ -142,6 +142,7 @@ export function PlayChessboard({ boardId, onStatusChange }: PlayChessboardProps)
             const target = gameRef.current.get(move.to)
             const source = gameRef.current.get(square)
             newSquares[move.to] = {
+                ...LEGAL_TARGET_STYLE,
                 background: target && target.color !== source?.color
                     ? 'radial-gradient(circle, transparent 70%, rgba(0,0,0,.1) 70%)'
                     : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)',
@@ -259,10 +260,10 @@ export function PlayChessboard({ boardId, onStatusChange }: PlayChessboardProps)
     const highlights = {
         ...optionSquares,
         ...(lastMoveSquares.from && {
-            [lastMoveSquares.from]: { backgroundColor: 'rgba(179, 197, 18, 0.4)' },
+            [lastMoveSquares.from]: { backgroundColor: 'rgba(179, 197, 18, 0.4)', ...(optionSquares[lastMoveSquares.from] && LEGAL_TARGET_STYLE) },
         }),
         ...(lastMoveSquares.to && {
-            [lastMoveSquares.to]: { backgroundColor: 'rgba(179, 197, 18, 0.4)' },
+            [lastMoveSquares.to]: { backgroundColor: 'rgba(179, 197, 18, 0.4)', ...(optionSquares[lastMoveSquares.to] && LEGAL_TARGET_STYLE) },
         }),
         ...(selectedSquare && {
             [selectedSquare]: { boxShadow: 'inset 0 0 0 4px rgba(245, 158, 11, 0.75)' },

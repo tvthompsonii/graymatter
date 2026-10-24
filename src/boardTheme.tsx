@@ -18,6 +18,14 @@ export const SOLUTION_ARROW_COLOR = 'rgba(34, 197, 94, 0.85)'
 export const WRONG_SQUARE_STYLE: CSSProperties = { boxShadow: 'inset 0 0 0 4px rgba(239, 68, 68, 0.9)' }
 
 /**
+ * While a piece is dragged, the square under it sets this CSS variable (via `dropSquareStyle`);
+ * legal target squares draw it through `LEGAL_TARGET_STYLE`, so only a legal square under the
+ * piece is outlined. Other squares just get the variable, which nothing reads.
+ */
+const DROP_OUTLINE_VAR = '--gm-drop-outline'
+export const LEGAL_TARGET_STYLE: CSSProperties = { boxShadow: `var(${DROP_OUTLINE_VAR}, none)` }
+
+/**
  * Layer outlines over base square styles, later entries winning (e.g. hint < selection < wrong move).
  * Each outline merges into the square's existing style so it keeps any last-move tint.
  */
@@ -58,4 +66,10 @@ export const boardChrome = {
     },
     darkSquareStyle: { backgroundColor: '#64748b' },
     lightSquareStyle: { backgroundColor: '#cbd5e1' },
+    // No lift-and-grow while dragging, and no thin black outline on every square passed over.
+    draggingPieceStyle: { transform: 'none' },
+    dropSquareStyle: {
+        boxShadow: 'none',
+        [DROP_OUTLINE_VAR]: SELECTED_SQUARE_STYLE.boxShadow,
+    } as CSSProperties,
 } as const

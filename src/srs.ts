@@ -21,6 +21,10 @@ export type ReviewRecord = {
     /** Local date (YYYY-MM-DD) of the first review, for the new-cards-per-day cap. */
     introduced: string
     lastReviewed: string
+    /** Graded showings, excluding a new card's arrow intro and practice moves. */
+    attempts: number
+    /** Of those, the ones answered right on the first try. */
+    correct: number
 }
 
 /** Every card's record by id, both sides together (the id encodes the side). */
@@ -70,6 +74,8 @@ export function gradeCard(card: Card, previous: ReviewRecord | undefined, pass: 
             step: 0,
             introduced: localDate(now),
             lastReviewed: now.toISOString(),
+            attempts: 0,
+            correct: 0,
         }
     r.san = card.san
     r.line = card.line
@@ -305,6 +311,10 @@ export type DeckStats = {
     total: number
     learned: number
     dueNow: number
+    /** Review cards due now (learning cards excluded). */
+    dueReviews: number
+    /** Cards still in learning or relearning; their steps are minutes long, so they all come back this session. */
+    inLearning: number
     newLeftToday: number
     /** Earliest due time among scheduled cards, or null when none are scheduled. */
     nextDueMs: number | null
@@ -318,6 +328,8 @@ export function deckStats(
     const nowMs = now.getTime()
     let learned = 0
     let dueNow = 0
+    let dueReviews = 0
+    let inLearning = 0
     let unseen = 0
     let nextDueMs: number | null = null
     for (const card of eligibleCards(decks, maxDepth)) {
@@ -329,10 +341,12 @@ export function deckStats(
         learned++
         const ms = dueMsOf(r)
         if (ms <= nowMs) dueNow++
+        if (r.state === 'review' && ms <= nowMs) dueReviews++
+        if (r.state !== 'review') inLearning++
         if (nextDueMs === null || ms < nextDueMs) nextDueMs = ms
     }
     const quota = Math.max(0, newPerDay - introducedToday(schedule, now))
-    return { total: learned + unseen, learned, dueNow, newLeftToday: Math.min(quota, unseen), nextDueMs }
+    return { total: learned + unseen, learned, dueNow, dueReviews, inLearning, newLeftToday: Math.min(quota, unseen), nextDueMs }
 }
 
 /** "now", "8 min", "3 h", "6 d". */

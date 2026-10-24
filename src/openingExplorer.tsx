@@ -13,6 +13,7 @@ import {
     boardChrome,
     customPieces,
     HINT_SQUARE_STYLE,
+    LEGAL_TARGET_STYLE,
     MOVE_ANIMATION_MS,
     SELECTED_SQUARE_STYLE,
     withSquareOutlines,
@@ -121,6 +122,7 @@ export function ExploreChessboard({ root, side, path, onPlay }: ExploreChessboar
         for (const move of moves) {
             const target = game.get(move.to)
             next[move.to] = {
+                ...LEGAL_TARGET_STYLE,
                 background: target && target.color !== source?.color
                     ? 'radial-gradient(circle, transparent 70%, rgba(0,0,0,.1) 70%)'
                     : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)',
@@ -202,7 +204,11 @@ export function ExploreChessboard({ root, side, path, onPlay }: ExploreChessboar
     const highlights = withSquareOutlines(
         {
             ...optionSquares,
-            ...(lastMove && !wrong && { [lastMove.from]: LAST_MOVE_STYLE, [lastMove.to]: LAST_MOVE_STYLE }),
+            // A legal target that is also a last-move square keeps its drag outline.
+            ...(lastMove && !wrong && {
+                [lastMove.from]: { ...LAST_MOVE_STYLE, ...(optionSquares[lastMove.from] && LEGAL_TARGET_STYLE) },
+                [lastMove.to]: { ...LAST_MOVE_STYLE, ...(optionSquares[lastMove.to] && LEGAL_TARGET_STYLE) },
+            }),
         },
         [
             [endOfLine && lastMove && !wrong ? lastMove.to : null, HINT_SQUARE_STYLE],
@@ -234,15 +240,18 @@ export function ExploreChessboard({ root, side, path, onPlay }: ExploreChessboar
 
 type ExploreViewProps = {
     loaded: LoadedRepertoires
-    /** The Explore | Drill switch, placed under the panel header. */
+    /** The Explore | Drill | Progress switch, placed under the panel header. */
     viewSwitch: ReactNode
+    /** Where to start (e.g. a move double-clicked in Progress); the start position by default. */
+    initialSide?: Side
+    initialPath?: string[]
 }
 
 /** Explore: walk either repertoire move by move, choosing every move yourself. */
-export function ExploreView({ loaded, viewSwitch }: ExploreViewProps) {
+export function ExploreView({ loaded, viewSwitch, initialSide = 'w', initialPath = [] }: ExploreViewProps) {
     const { whiteRepertoire, blackRepertoire, ready, loadError } = loaded
-    const [side, setSide] = useState<Side>('w')
-    const [path, setPath] = useState<string[]>([])
+    const [side, setSide] = useState<Side>(initialSide)
+    const [path, setPath] = useState<string[]>(initialPath)
 
     const repertoire = side === 'w' ? whiteRepertoire : blackRepertoire
     const root = ready ? (repertoire?.root ?? null) : null

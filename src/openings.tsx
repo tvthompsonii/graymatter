@@ -14,6 +14,7 @@ import {
     CORRECT_MOVE_DISPLAY_MS,
     customPieces,
     HINT_SQUARE_STYLE,
+    LEGAL_TARGET_STYLE,
     MOVE_ANIMATION_MS,
     SELECTED_SQUARE_STYLE,
     SOLUTION_ARROW_COLOR,
@@ -24,6 +25,7 @@ import {
 import type { GraymatterPaths } from './graymatter'
 import { fenSig, formatLine, logRepertoireTreeDfs, normalizeSan } from './moveTree'
 import { ExploreView } from './openingExplorer'
+import { ProgressView } from './openingProgress'
 import { parsePgnToRepertoire, type ParsedRepertoire } from './pgnPaths'
 import { buildCardDeck, pickSetupPath, type Card, type CardDeck } from './repertoireCards'
 import { NEW_CARDS_PER_DAY_MAX, NEW_CARDS_PER_DAY_MIN, type AppSettings, type TrainMode } from './settings'
@@ -37,9 +39,10 @@ import {
     pickNextCard,
     type ChainPick,
     type PickOptions,
+    type ReviewRecord,
     type Schedule,
 } from './srs'
-import { mergeSchedules, parseTrainingFileJson, serializeTrainingFile } from './trainingExport'
+import { mergeSchedules, readSchedule, serializeTrainingFile } from './trainingExport'
 import { Button, RangeSlider, SegmentedControl, ValueBadge } from './ui/controls'
 import { LightbulbIcon, ResetIcon } from './ui/icons'
 import {
@@ -77,7 +80,7 @@ export type CardChessboardProps = {
     /** True for a card never reviewed: its first showing draws the answer as an arrow. */
     isNewCard: (card: Card) => boolean
     /** Called once per showing: on the first wrong move or hint (fail), or the correct move (pass). */
-    onCardAnswered: (card: Card, pass: boolean, practice: boolean) => void
+    onCardAnswered: (card: Card, pass: boolean, practice: boolean, intro: boolean) => void
     /** The trainee played a different book move for this position; taken back with no penalty. */
     onAlternateBookMove: () => void
     /** Opponent replies from this position (after the trainee's correct answer to `answeredId`) to the chain's next card. */
@@ -207,7 +210,7 @@ export function CardChessboard({
     const [fen, setFen] = useState(() => gameRef.current.fen())
     const [boardKey, setBoardKey] = useState(0)
     const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
-    const [optionSquares, setOptionSquares] = useState({});
+    const [optionSquares, setOptionSquares] = useState<Record<string, React.CSSProperties>>({});
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({});
     const [hintSquare, setHintSquare] = useState<string | null>(null)
     const [wrongSquare, setWrongSquare] = useState<string | null>(null)
@@ -259,7 +262,7 @@ export function CardChessboard({
         const current = currentCardRef.current
         if (!current || gradedRef.current) return
         gradedRef.current = true
-        callbacksRef.current.onCardAnswered(current, pass, practiceRef.current)
+        callbacksRef.current.onCardAnswered(current, pass, practiceRef.current, introducingRef.current)
     }, [])
 
     /** Hint pressed while setup moves were still playing; shown once the card is up. */
@@ -433,6 +436,7 @@ export function CardChessboard({
         const newSquares: Record<string, React.CSSProperties> = {};
         moves.forEach((move) => {
                 newSquares[move.to] = {
+                        ...LEGAL_TARGET_STYLE,
                         background: gameRef.current.get(move.to) && gameRef.current.get(move.to)?.color !== gameRef.current.get(square)?.color
                                 ? 'radial-gradient(circle, transparent 70%, rgba(0,0,0,.1) 70%)'   // larger circle for capturing
                                 : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)'  // smaller circle for open square
@@ -490,10 +494,10 @@ export function CardChessboard({
         {
             ...optionSquares,
             ...(lastMoveSquares.from && {
-                [lastMoveSquares.from]: { backgroundColor: "rgba(179, 197, 18, 0.4)" }
+                [lastMoveSquares.from]: { backgroundColor: "rgba(179, 197, 18, 0.4)", ...(optionSquares[lastMoveSquares.from] && LEGAL_TARGET_STYLE) }
             }),
             ...(lastMoveSquares.to && {
-                [lastMoveSquares.to]: { backgroundColor: "rgba(179, 197, 18, 0.4)" }
+                [lastMoveSquares.to]: { backgroundColor: "rgba(179, 197, 18, 0.4)", ...(optionSquares[lastMoveSquares.to] && LEGAL_TARGET_STYLE) }
             }),
         },
         [
@@ -539,14 +543,15 @@ type OpeningsPageProps = {
     onSettingsChange: (patch: Partial<AppSettings>) => void
 }
 
-type OpeningsView = 'explore' | 'drill'
+type OpeningsView = 'explore' | 'drill' | 'progress'
 
 const VIEW_OPTIONS = [
     { value: 'explore', label: 'Explore' },
     { value: 'drill', label: 'Drill' },
+    { value: 'progress', label: 'Progress' },
 ] as const satisfies ReadonlyArray<{ value: OpeningsView; label: string }>
 
-/** Repertoires as loaded once by OpeningsPage and shared by both views. */
+/** Repertoires as loaded once by OpeningsPage and shared by every view. */
 export type LoadedRepertoires = {
     paths: GraymatterPaths | null
     whiteRepertoire: ParsedRepertoire | null
@@ -557,11 +562,13 @@ export type LoadedRepertoires = {
 }
 
 /**
- * Loads both repertoires once, then shows Explore (the default every time the tab opens) or
- * Drill. Each view puts the Explore | Drill switch in its own panel.
+ * Loads both repertoires once, then shows Explore (the default every time the tab opens), Drill
+ * or Progress. Each view puts the Explore | Drill | Progress switch in its own panel.
  */
 export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) {
     const [view, setView] = useState<OpeningsView>('explore')
+    // Set when Progress opens a line in Explore; cleared by the view switch.
+    const [exploreTarget, setExploreTarget] = useState<{ side: Side; path: string[] } | null>(null)
     const [loaded, setLoaded] = useState<LoadedRepertoires>({
         paths: null,
         whiteRepertoire: null,
@@ -626,20 +633,45 @@ export function OpeningsPage({ settings, onSettingsChange }: OpeningsPageProps) 
         }
     }, [])
 
+    const changeView = (next: OpeningsView) => {
+        setExploreTarget(null)
+        setView(next)
+    }
     const viewSwitch = (
-        <SegmentedControl label="Openings mode" options={VIEW_OPTIONS} value={view} onChange={setView} />
+        <SegmentedControl label="Openings mode" options={VIEW_OPTIONS} value={view} onChange={changeView} />
     )
 
-    return view === 'explore'
-        ? <ExploreView loaded={loaded} viewSwitch={viewSwitch} />
-        : (
-            <DrillView
-                settings={settings}
-                onSettingsChange={onSettingsChange}
+    if (view === 'explore') {
+        return (
+            <ExploreView
                 loaded={loaded}
                 viewSwitch={viewSwitch}
+                initialSide={exploreTarget?.side}
+                initialPath={exploreTarget?.path}
             />
         )
+    }
+    if (view === 'progress') {
+        return (
+            <ProgressView
+                loaded={loaded}
+                viewSwitch={viewSwitch}
+                settings={settings}
+                onOpenInExplore={(side, path) => {
+                    setExploreTarget({ side, path })
+                    setView('explore')
+                }}
+            />
+        )
+    }
+    return (
+        <DrillView
+            settings={settings}
+            onSettingsChange={onSettingsChange}
+            loaded={loaded}
+            viewSwitch={viewSwitch}
+        />
+    )
 }
 
 type DrillViewProps = OpeningsPageProps & {
@@ -662,6 +694,26 @@ function setupLineSans(setup: readonly string[]): string[] {
     return sans
 }
 
+/** What kind of showing a card is, fixed when it's shown (grading it mid-showing doesn't relabel it). */
+type CardLabel = 'review' | 'new' | 'recall' | 'retry' | 'practice'
+
+function cardLabelFor(record: ReviewRecord | undefined, practice: boolean): CardLabel {
+    if (practice) return 'practice'
+    if (!record) return 'new'
+    // A new card passed with the arrow sits on learning step 1; any miss puts it back on step 0.
+    if (record.state === 'relearning' || (record.state === 'learning' && record.step === 0)) return 'retry'
+    if (record.state === 'learning') return 'recall'
+    return 'review'
+}
+
+const CARD_LABEL_TEXT: Record<CardLabel, { title: string; note: string }> = {
+    review: { title: 'Your move', note: '' },
+    new: { title: 'New move', note: ' · play the arrow' },
+    recall: { title: 'Recall', note: ' · new move, no arrow this time' },
+    retry: { title: 'Retry', note: ' · missed earlier' },
+    practice: { title: 'Practice', note: ' · not graded' },
+}
+
 /** How often the panel's due counts refresh, and an idle drill re-checks for due cards. */
 const DRILL_TICK_MS = 30_000
 
@@ -681,6 +733,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     const [lessonKey, setLessonKey] = useState(0)
     const [currentCard, setCurrentCard] = useState<Card | null>(null)
     const [currentIsPractice, setCurrentIsPractice] = useState(false)
+    const [shownLabel, setShownLabel] = useState<CardLabel>('review')
     const [scheduleReady, setScheduleReady] = useState(false)
     // The schedule is mutated in place; bump this to re-render the counts.
     const [, setScheduleRevision] = useState(0)
@@ -744,13 +797,8 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
         if (!paths) return
         let cancelled = false
         void (async () => {
-            let schedule: Schedule = new Map()
-            try {
-                schedule = parseTrainingFileJson(await window.graymatter.readTextFile(paths.trainingStatus))
-            }
-            catch {
-                // No training file yet — every card starts new.
-            }
+            // No training file yet: every card starts new.
+            const schedule = await readSchedule(paths.trainingStatus)
             if (cancelled) return
             scheduleRef.current = schedule
             setScheduleReady(true)
@@ -767,13 +815,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
         saveChainRef.current = saveChainRef.current
             .then(async () => {
                 if (!opts?.replace) {
-                    let onDisk: Schedule = new Map()
-                    try {
-                        onDisk = parseTrainingFileJson(await window.graymatter.readTextFile(currentPaths.trainingStatus))
-                    }
-                    catch {
-                        // Missing file: nothing to merge.
-                    }
+                    const onDisk = await readSchedule(currentPaths.trainingStatus)
                     // Merge after the read so a review made while it was in flight isn't lost.
                     scheduleRef.current = mergeSchedules(onDisk, scheduleRef.current)
                     setScheduleRevision((revision) => revision + 1)
@@ -813,6 +855,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
         chainNewCountRef.current = 0
         chainVisitedRef.current = new Set()
         setActiveSide(picked.card.side)
+        setShownLabel(cardLabelFor(scheduleRef.current.get(picked.card.id), false))
         setCurrentCard(null)
         setJumpCard(picked.card)
         setSetupPath(setup)
@@ -854,10 +897,11 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
         chainVisitedRef.current.add(card.posKey)
         setCurrentCard(card)
         setCurrentIsPractice(practice)
+        setShownLabel(cardLabelFor(scheduleRef.current.get(card.id), practice))
         setShowAlternateNotice(false)
     }, [])
 
-    const onCardAnswered = useCallback((card: Card, pass: boolean, practice: boolean) => {
+    const onCardAnswered = useCallback((card: Card, pass: boolean, practice: boolean, intro: boolean) => {
         const previous = scheduleRef.current.get(card.id)
         if (practice) {
             // A correct practice move leaves the schedule alone; only a miss counts.
@@ -865,7 +909,13 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
             scheduleRef.current.set(card.id, missPracticeCard(card, previous, new Date()))
         }
         else {
-            scheduleRef.current.set(card.id, gradeCard(card, previous, pass, new Date()))
+            const record = gradeCard(card, previous, pass, new Date())
+            // The arrow intro is copied, not recalled, so it doesn't count toward accuracy.
+            if (!intro) {
+                record.attempts++
+                if (pass) record.correct++
+            }
+            scheduleRef.current.set(card.id, record)
             setSessionReviews((count) => count + 1)
         }
         setScheduleRevision((revision) => revision + 1)
@@ -944,8 +994,8 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     else {
         banner = (
             <StatusBanner
-                title={traineeToMove ? (practicing ? 'Practice' : currentRecord ? 'Your move' : 'New move') : 'Book move'}
-                text={`· ${sideName} repertoire${traineeToMove && practicing ? ' · not graded' : ''}`}
+                title={traineeToMove ? CARD_LABEL_TEXT[shownLabel].title : 'Book move'}
+                text={`· ${sideName} repertoire${traineeToMove ? CARD_LABEL_TEXT[shownLabel].note : ''}`}
                 marker={traineeToMove ? undefined : <SideMarker side={sideToMove} />}
             >
                 <div className="font-mono text-xs text-soft">
@@ -966,7 +1016,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
     if (shownCard) {
         cardScheduleText = currentRecord
             ? `${practicing ? 'Practice · ' : ''}Next review ${formatWait(Date.parse(currentRecord.due) - Date.now())} · ease ${currentRecord.ease} · lapses ${currentRecord.lapses}`
-            : 'New card · play the arrow'
+            : 'New card'
     }
 
     return (
@@ -1087,8 +1137,10 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
 
             <PanelCard>
                 <div className="flex items-baseline justify-between">
-                    <span className="text-[13px] text-soft">Due now</span>
-                    <span className="font-mono text-[22px] font-semibold text-ink">{loading ? '–' : stats.dueNow}</span>
+                    <span className="text-[13px] text-soft">Left this session</span>
+                    <span className="font-mono text-[22px] font-semibold text-ink">
+                        {loading ? '–' : stats.dueReviews + stats.inLearning + stats.newLeftToday}
+                    </span>
                 </div>
                 <ProgressBar
                     label="Cards learned"
@@ -1097,6 +1149,8 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
                     tone="success"
                 />
                 <div className="grid grid-cols-3 gap-2">
+                    <StatTile label="Due" value={loading ? '–' : stats.dueReviews} />
+                    <StatTile label="Learning" value={loading ? '–' : stats.inLearning} />
                     <StatTile label="New today" value={loading ? '–' : stats.newLeftToday} />
                     <StatTile label="Learned" value={loading ? '–' : `${stats.learned}/${stats.total}`} />
                     <StatTile label="Session" value={sessionReviews} accent />
