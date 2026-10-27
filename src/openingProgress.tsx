@@ -100,8 +100,11 @@ type ProgressViewProps = {
 /** Progress: the repertoire as a left-to-right tree, each of your moves colored by how well you know it. */
 export function ProgressView({ loaded, viewSwitch, settings, onOpenInExplore }: ProgressViewProps) {
     const { paths, whiteRepertoire, blackRepertoire, ready, loadError } = loaded
-    const [side, setSide] = useState<Side>('w')
+    // Opens on the side Drill trains; with Both, on whichever side has more due once the schedule is read.
+    const [side, setSide] = useState<Side>(settings.openingsTrainMode === 'black' ? 'b' : 'w')
+    const sidePickedRef = useRef(settings.openingsTrainMode !== 'both')
     const [schedule, setSchedule] = useState<Schedule>(new Map())
+    const [scheduleLoaded, setScheduleLoaded] = useState(false)
     const [nowMs, setNowMs] = useState(() => Date.now())
     const maxDepth = settings.openingsTrainDepth
 
@@ -110,7 +113,9 @@ export function ProgressView({ loaded, viewSwitch, settings, onOpenInExplore }: 
         if (!paths) return
         let cancelled = false
         void readSchedule(paths.trainingStatus).then((s) => {
-            if (!cancelled) setSchedule(s)
+            if (cancelled) return
+            setSchedule(s)
+            setScheduleLoaded(true)
         })
         return () => {
             cancelled = true
@@ -122,14 +127,32 @@ export function ProgressView({ loaded, viewSwitch, settings, onOpenInExplore }: 
         return () => window.clearInterval(id)
     }, [])
 
-    const repertoire = side === 'w' ? whiteRepertoire : blackRepertoire
-    const deck = useMemo<CardDeck | null>(
-        () => (ready && repertoire ? buildCardDeck(repertoire.root, side) : null),
-        [ready, repertoire, side],
+    const whiteDeck = useMemo<CardDeck | null>(
+        () => (ready && whiteRepertoire ? buildCardDeck(whiteRepertoire.root, 'w') : null),
+        [ready, whiteRepertoire],
     )
+    const blackDeck = useMemo<CardDeck | null>(
+        () => (ready && blackRepertoire ? buildCardDeck(blackRepertoire.root, 'b') : null),
+        [ready, blackRepertoire],
+    )
+    const deck = side === 'w' ? whiteDeck : blackDeck
+    const dueOf = (d: CardDeck | null) => (d ? countCards(d.cards.keys(), d, schedule, maxDepth, nowMs).due : 0)
+    const whiteDue = dueOf(whiteDeck)
+    const blackDue = dueOf(blackDeck)
+
+    useEffect(() => {
+        if (sidePickedRef.current || !scheduleLoaded || !whiteDeck || !blackDeck) return
+        sidePickedRef.current = true
+        if (blackDue > whiteDue) setSide('b')
+    }, [blackDeck, blackDue, scheduleLoaded, whiteDeck, whiteDue])
+
+    const chooseSide = (next: Side) => {
+        sidePickedRef.current = true
+        setSide(next)
+    }
     const tree = useMemo(
-        () => (deck && repertoire ? buildProgressTree(repertoire.root, deck) : null),
-        [deck, repertoire],
+        () => (deck ? buildProgressTree(deck) : null),
+        [deck],
     )
     /** First place in the tree each card appears, for jumping to it. */
     const firstNodeOfCard = useMemo(() => {
@@ -322,7 +345,11 @@ export function ProgressView({ loaded, viewSwitch, settings, onOpenInExplore }: 
                 if (!draggedRef.current) toggle(node)
             },
             onDoubleClick: () => {
-                if (node.id) onOpenInExplore(side, node.path)
+                // Explore walks the PGN as written, so open a written route to this position.
+                if (!node.id) return
+                const written = deck?.positions.get(node.posKey)?.reachPaths
+                    .reduce<string[] | null>((best, p) => (!best || p.length < best.length ? p : best), null)
+                onOpenInExplore(side, written ?? node.path)
             },
             style: { cursor: node.children.length ? 'pointer' : 'default' },
         }
@@ -340,11 +367,23 @@ export function ProgressView({ loaded, viewSwitch, settings, onOpenInExplore }: 
                 )
             }
         }
+        // A due card hidden below a collapsed node puts the due dot after its +N.
+        let hiddenDue = false
+        if (collapsedKids && deck) {
+            const below = new Set(node.children.flatMap((child) => child.subtreeCards))
+            hiddenDue = countCards(below, deck, schedule, maxDepth, nowMs).due > 0
+        }
+        const moreLabel = `+${node.children.length}`
+        const moreX = (node.isTrainee ? TRAINEE_W : OPPONENT_W) + 5
+        const moreY = (node.isTrainee ? TRAINEE_H : OPPONENT_H) / 2
         const more = collapsedKids
             ? (
-                <text x={(node.isTrainee ? TRAINEE_W : OPPONENT_W) + 5} y={(node.isTrainee ? TRAINEE_H : OPPONENT_H) / 2 + 4} className="font-mono" fontSize={10} fill="#7c8aa0">
-                    +{node.children.length}
-                </text>
+                <g>
+                    <text x={moreX} y={moreY + 4} className="font-mono" fontSize={10} fill={hiddenDue ? '#fcd34d' : '#7c8aa0'}>
+                        {moreLabel}
+                    </text>
+                    {hiddenDue && <circle cx={moreX + moreLabel.length * 6 + 5} cy={moreY} r={3.5} fill="#fcd34d" stroke="#070b14" strokeWidth={1} />}
+                </g>
             )
             : null
         const transposeBadge = node.transposesTo
@@ -449,8 +488,8 @@ export function ProgressView({ loaded, viewSwitch, settings, onOpenInExplore }: 
             const c = countCards(node.subtreeCards, deck, schedule, maxDepth, nowMs)
             rows.push(['Below here', `${c.review}/${c.total} learned · ${c.due} due`])
         }
-        if (node.transposed) rows.push(['Transposition', 'also reached by another move order'])
-        if (node.transposesTo) rows.push(['Continues at', formatLine(node.transposesTo).join(' ')])
+        if (node.transposed) rows.push(['Transposition', 'other move orders reach this position too'])
+        if (node.transposesTo) rows.push(['Transposes to', `${formatLine(node.transposesTo).join(' ')} (click ⇄)`])
 
         const width = containerRef.current?.clientWidth ?? 0
         const flip = hover.x > width - 280
@@ -521,14 +560,14 @@ export function ProgressView({ loaded, viewSwitch, settings, onOpenInExplore }: 
                 subtitle="How well you know each move."
                 info={'Your moves are outlined by state: white not yet trained, amber learning, green learned, '
                     + 'red missed and relearning. A warmer fill means a move has been harder for you (lower ease '
-                    + 'or accuracy). A yellow dot means it is due now. Click a move to expand or collapse it, '
+                    + 'or accuracy). A yellow dot means it is due now; on a collapsed +N it means something due is hidden below. Click a move to expand or collapse it, '
                     + 'double-click to open it in Explore, drag to pan and scroll to zoom. ⇄ marks transpositions.'}
             />
 
             {viewSwitch}
 
             <Section label="Repertoire">
-                <SegmentedControl label="Repertoire" options={SIDE_OPTIONS} value={side} onChange={setSide} />
+                <SegmentedControl label="Repertoire" options={SIDE_OPTIONS} value={side} onChange={chooseSide} />
             </Section>
 
             <PanelCard>

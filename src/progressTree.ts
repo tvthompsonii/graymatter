@@ -1,67 +1,72 @@
-import { Chess } from 'chess.js'
-
-import { fenSig, walkToNode, type Node } from './moveTree'
 import { cardId, type CardDeck } from './repertoireCards'
 import type { ReviewRecord, Schedule } from './srs'
 
-/** One move of the repertoire trie, for the Progress view. */
+/** One book move in the Progress tree. */
 export type ProgressNode = {
     /** The SANs from the start joined by spaces ('' for the start position). */
     id: string
     san: string
     path: string[]
+    /** `fenSig` of the position after this move. */
+    posKey: string
     isTrainee: boolean
     /** The trainee's card for this move; null for opponent moves and the start node. */
     cardId: string | null
-    /** The card's position is reached by more than one written route, so this card shows up in several places. */
+    /** This node shows the continuation of a position that other move orders also reach. */
     transposed: boolean
-    /** A leaf whose position continues elsewhere in the book: the written route to that continuation. */
+    /** Another move order into a position whose continuation is shown elsewhere: that position's main route. */
     transposesTo: string[] | null
     children: ProgressNode[]
-    /** Distinct card ids in this subtree, this node included (a transposed card counts once). */
+    /** Distinct card ids in this subtree, this node included. */
     subtreeCards: string[]
 }
 
-/** Builds the Progress tree from a repertoire trie; `deck` is the same side's card deck. */
-export function buildProgressTree(root: Node, deck: CardDeck): ProgressNode {
-    function build(n: Node, path: string[], parentFen: string | null): ProgressNode {
-        const san = path[path.length - 1] ?? ''
-        let id: string | null = null
-        let transposed = false
-        if (parentFen) {
-            const parentKey = fenSig(parentFen)
-            if (parentFen.split(' ')[1] === deck.side) {
-                const move = new Chess(parentFen).move(san, { strict: false })
-                id = cardId(parentKey, `${move.from}${move.to}${move.promotion ?? ''}`)
-                transposed = (deck.positions.get(parentKey)?.reachPaths.length ?? 0) > 1
-            }
-        }
+/**
+ * Builds the Progress tree from the deck's position graph, so each position's continuation is
+ * drawn once, under its main (canonical) route: the shortest, then alphabetically first. Every
+ * other move order into it ends in a `transposesTo` leaf. Built from the graph rather than the
+ * PGN, a normalized and a denormalized repertoire draw the same tree.
+ */
+export function buildProgressTree(deck: CardDeck): ProgressNode {
+    // How many book moves lead into each position, over every route.
+    const inDegree = new Map<string, number>()
+    for (const pos of deck.positions.values())
+        for (const edge of pos.edges.values()) inDegree.set(edge.toKey, (inDegree.get(edge.toKey) ?? 0) + 1)
 
-        const children = [...n.children.keys()].sort().map((childSan) => build(n.children.get(childSan)!, [...path, childSan], n.fen))
+    function build(key: string, path: string[], card: string | null): ProgressNode {
+        const pos = deck.positions.get(key)
+        const id = path.join(' ')
+        const main = deck.canonical.get(key)
+        const isMain = !!main && main.join(' ') === id
+        const hasMoves = !!pos && pos.edges.size > 0
 
-        let transposesTo: string[] | null = null
-        if (!children.length) {
-            const pos = deck.positions.get(fenSig(n.fen))
-            if (pos && pos.edges.size > 0)
-                transposesTo = pos.reachPaths.find((p) => (walkToNode(root, p)?.children.size ?? 0) > 0) ?? null
-        }
+        const children = isMain && pos
+            ? [...pos.edges.values()]
+                .sort((a, b) => (a.san < b.san ? -1 : a.san > b.san ? 1 : 0))
+                .map((edge) => build(
+                    edge.toKey,
+                    [...path, edge.san],
+                    pos.sideToMove === deck.side ? cardId(key, edge.uci) : null,
+                ))
+            : []
 
-        const cards = new Set<string>(id ? [id] : [])
+        const cards = new Set<string>(card ? [card] : [])
         for (const child of children) for (const c of child.subtreeCards) cards.add(c)
 
         return {
-            id: path.join(' '),
-            san,
+            id,
+            san: path[path.length - 1] ?? '',
             path,
-            isTrainee: id !== null,
-            cardId: id,
-            transposed,
-            transposesTo,
+            posKey: key,
+            isTrainee: card !== null,
+            cardId: card,
+            transposed: isMain && hasMoves && (inDegree.get(key) ?? 0) > 1,
+            transposesTo: !isMain && hasMoves && main ? main : null,
             children,
             subtreeCards: [...cards],
         }
     }
-    return build(root, [], null)
+    return build(deck.startKey, [], null)
 }
 
 export type CardStatus = 'untrained' | 'learning' | 'review' | 'relearning'

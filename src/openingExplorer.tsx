@@ -16,15 +16,17 @@ import {
     LEGAL_TARGET_STYLE,
     MOVE_ANIMATION_MS,
     SELECTED_SQUARE_STYLE,
+    SOLUTION_ARROW_COLOR,
     withSquareOutlines,
     WRONG_MOVE_DISPLAY_MS,
     WRONG_SQUARE_STYLE,
 } from './boardTheme'
-import { formatLine, repertoireSanForPlayed, walkToNode, type Node } from './moveTree'
+import { repertoireSanForPlayed, walkToNode, type Node } from './moveTree'
 import type { LoadedRepertoires } from './openings'
 import { Button, SegmentedControl } from './ui/controls'
 import { ResetIcon, UndoIcon } from './ui/icons'
 import { BoardPage, ErrorNote, PanelHeader, Section, SideMarker, StatusBanner } from './ui/layout'
+import { MoveList } from './ui/moveList'
 
 type Side = 'w' | 'b'
 
@@ -58,13 +60,15 @@ type ExploreChessboardProps = {
     path: readonly string[]
     /** A book move was played (on the board); the page appends it to `path`. */
     onPlay: (san: string) => void
+    /** The book move whose panel button is hovered; an opponent move's arrow turns green. */
+    hoveredSan?: string | null
 }
 
 /**
  * Board for Explore: shows the position at `path`, draws an arrow for every book move from it,
  * and accepts only those moves (for whichever side is to move). Nothing plays automatically.
  */
-export function ExploreChessboard({ root, side, path, onPlay }: ExploreChessboardProps) {
+export function ExploreChessboard({ root, side, path, onPlay, hoveredSan = null }: ExploreChessboardProps) {
     const node = walkToNode(root, path) ?? root
     const turn: Side = new Chess(node.fen).turn()
     const bookSans = useMemo(() => [...node.children.keys()], [node])
@@ -97,12 +101,16 @@ export function ExploreChessboard({ root, side, path, onPlay }: ExploreChessboar
     useEffect(() => clearWrong, [clearWrong])
 
     const arrows = useMemo<Arrow[]>(() => {
-        const color = turn === side ? OWN_ARROW_COLOR : OPPONENT_ARROW_COLOR
-        return bookSans.flatMap((san) => {
+        const own = turn === side
+        // The hovered move goes last so its arrow is drawn on top.
+        const ordered = [...bookSans.filter((san) => san !== hoveredSan), ...bookSans.filter((san) => san === hoveredSan)]
+        return ordered.flatMap((san) => {
             const squares = moveSquares(node.fen, san)
+            // Your side has a single book move, so only the opponent's hovered reply needs picking out.
+            const color = own ? OWN_ARROW_COLOR : san === hoveredSan ? SOLUTION_ARROW_COLOR : OPPONENT_ARROW_COLOR
             return squares ? [{ startSquare: squares.from, endSquare: squares.to, color }] : []
         })
-    }, [bookSans, node, side, turn])
+    }, [bookSans, hoveredSan, node, side, turn])
 
     const lastMove = useMemo(() => {
         if (!path.length) return null
@@ -252,6 +260,9 @@ export function ExploreView({ loaded, viewSwitch, initialSide = 'w', initialPath
     const { whiteRepertoire, blackRepertoire, ready, loadError } = loaded
     const [side, setSide] = useState<Side>(initialSide)
     const [path, setPath] = useState<string[]>(initialPath)
+    const [hoveredSan, setHoveredSan] = useState<string | null>(null)
+    // Buttons are replaced when the position changes, so no mouseleave clears the old hover.
+    useEffect(() => setHoveredSan(null), [path, side])
 
     const repertoire = side === 'w' ? whiteRepertoire : blackRepertoire
     const root = ready ? (repertoire?.root ?? null) : null
@@ -290,10 +301,30 @@ export function ExploreView({ loaded, viewSwitch, initialSide = 'w', initialPath
     return (
         <BoardPage
             label="Explore controls"
+            footer={(
+                <div className="flex gap-2">
+                    <Button
+                        className="flex-1"
+                        icon={<UndoIcon />}
+                        onClick={() => setPath((prev) => prev.slice(0, -1))}
+                        disabled={!path.length}
+                    >
+                        Back
+                    </Button>
+                    <Button
+                        variant="ghost"
+                        icon={<ResetIcon />}
+                        onClick={() => setPath([])}
+                        disabled={!path.length}
+                    >
+                        Reset
+                    </Button>
+                </div>
+            )}
             board={(
                 <div className="board-panel">
                     {root
-                        ? <ExploreChessboard root={root} side={side} path={path} onPlay={play} />
+                        ? <ExploreChessboard root={root} side={side} path={path} onPlay={play} hoveredSan={hoveredSan} />
                         : (
                             <Chessboard
                                 options={{
@@ -324,53 +355,35 @@ export function ExploreView({ loaded, viewSwitch, initialSide = 'w', initialPath
 
             {banner}
 
-            <Section label="Line">
-                <div className="rounded-[10px] border border-line bg-rail px-3 py-2 font-mono text-xs leading-relaxed text-soft">
-                    {path.length ? formatLine(path).join(' ') : 'Start position'}
+            <Section label="Line" className="min-h-0 flex-1">
+                <MoveList moves={path} emptyText="Start position" />
+            </Section>
+
+            {/* Always shown, with room for two rows of buttons, so the line box doesn't jump as the count changes. */}
+            <Section label="Book moves">
+                <div className="flex min-h-[66px] flex-wrap content-start gap-1.5">
+                    {bookSans.map((san) => (
+                        <button
+                            key={san}
+                            type="button"
+                            onClick={() => play(san)}
+                            onMouseEnter={() => setHoveredSan(san)}
+                            onMouseLeave={() => setHoveredSan((h) => (h === san ? null : h))}
+                            onFocus={() => setHoveredSan(san)}
+                            onBlur={() => setHoveredSan((h) => (h === san ? null : h))}
+                            className={`h-[30px] rounded-full border px-3 font-mono text-[13px] font-semibold transition ${
+                                turn === side
+                                    ? 'border-accent/45 bg-accent/15 text-accent-ink hover:bg-accent/25'
+                                    : 'border-[#4a5a76] bg-[#7d91b4]/15 text-[#c3cfe2] hover:bg-[#7d91b4]/25'
+                            }`}
+                        >
+                            {san}
+                        </button>
+                    ))}
                 </div>
             </Section>
 
-            {bookSans.length > 0 && (
-                <Section label="Book moves">
-                    <div className="flex flex-wrap gap-1.5">
-                        {bookSans.map((san) => (
-                            <button
-                                key={san}
-                                type="button"
-                                onClick={() => play(san)}
-                                className={`h-[30px] rounded-full border px-3 font-mono text-[13px] font-semibold transition ${
-                                    turn === side
-                                        ? 'border-accent/45 bg-accent/15 text-accent-ink hover:bg-accent/25'
-                                        : 'border-[#4a5a76] bg-[#7d91b4]/15 text-[#c3cfe2] hover:bg-[#7d91b4]/25'
-                                }`}
-                            >
-                                {san}
-                            </button>
-                        ))}
-                    </div>
-                </Section>
-            )}
-
             {loadError && <ErrorNote>{loadError}</ErrorNote>}
-
-            <div className="mt-auto flex gap-2">
-                <Button
-                    className="flex-1"
-                    icon={<UndoIcon />}
-                    onClick={() => setPath((prev) => prev.slice(0, -1))}
-                    disabled={!path.length}
-                >
-                    Back
-                </Button>
-                <Button
-                    variant="ghost"
-                    icon={<ResetIcon />}
-                    onClick={() => setPath([])}
-                    disabled={!path.length}
-                >
-                    Reset
-                </Button>
-            </div>
         </BoardPage>
     )
 }
