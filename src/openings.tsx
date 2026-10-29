@@ -32,7 +32,6 @@ import { NEW_CARDS_PER_DAY_MAX, NEW_CARDS_PER_DAY_MIN, type AppSettings, type Tr
 import {
     deckStats,
     formatWait,
-    CHAIN_MAX_NEW,
     gradeCard,
     missPracticeCard,
     pickChainPath,
@@ -940,7 +939,7 @@ function DrillView({ settings, onSettingsChange, loaded, viewSwitch }: DrillView
         return pickChainPath(activeDeck, scheduleRef.current, positionKey, {
             ...options,
             allowAhead: jump?.kind === 'ahead',
-            newLeft: CHAIN_MAX_NEW - chainNewCountRef.current,
+            introducing: chainNewCountRef.current > 0,
             visited: chainVisitedRef.current,
         })
     }, [activeDeck, decksForMode, trainMode])

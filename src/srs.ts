@@ -201,9 +201,6 @@ export function pickNextCard(
     return null
 }
 
-/** Most new cards one chain may introduce, counting the card the chain started from. */
-export const CHAIN_MAX_NEW = 3
-
 /**
  * The next stop of a chain: the opponent replies to play (usually one), then a card for the
  * trainee. A practice card is a review card that isn't due: played for context, and only a
@@ -214,30 +211,32 @@ export type ChainPick = { sans: string[]; card: Card; practice: boolean }
 export type ChainOptions = PickOptions & {
     /** Learning cards due soon count as tests (only when a jump would pick one too). */
     allowAhead: boolean
-    /** New cards this chain may still introduce. */
-    newLeft: number
+    /** This chain has introduced a new card, so it finishes that line regardless of today's cap. */
+    introducing: boolean
     /** Positions this chain has already been through. */
     visited: ReadonlySet<string>
 }
 
 /**
  * After the trainee's move, the next stop along the book. Breadth-first through the opponent's
- * replies and the trainee's practice cards to the nearest card to test: due, new (within
- * today's cap and the chain's `newLeft`), or with `allowAhead` a learning card due soon; at
- * equal distance due beats new beats ahead. Returns the first stop on the way there, which is
- * a practice card when the test is further on. With nothing to test, practice continues down
- * a random line. A learning card that isn't due, a new card past the cap, Max depth or a leaf
- * ends that line, so the chain never shows a move the trainee is still learning. Null ends the
- * chain.
+ * replies and the trainee's practice cards to the nearest card to test: due, new, or with
+ * `allowAhead` a learning card due soon; at equal distance due beats new beats ahead. New cards
+ * start a line only while today's cap has room; once the chain has introduced one
+ * (`introducing`), it keeps going to the end of the line or Max depth, so the daily count can go
+ * over by up to one line. Returns the first stop on the way there, which is a practice card when
+ * the test is further on. With nothing to test, practice continues down a random line. A
+ * learning card that isn't due, a new card past the cap (outside an introducing chain), Max
+ * depth or a leaf ends that line, so the chain never shows a move the trainee is still learning.
+ * Null ends the chain.
  */
 export function pickChainPath(
     deck: CardDeck,
     schedule: Schedule,
     positionKey: string,
-    { now, maxDepth, newPerDay, excludeId, allowAhead, newLeft, visited: chainVisited }: ChainOptions,
+    { now, maxDepth, newPerDay, excludeId, allowAhead, introducing, visited: chainVisited }: ChainOptions,
 ): ChainPick | null {
     const nowMs = now.getTime()
-    const newAllowed = newLeft > 0 && introducedToday(schedule, now) < newPerDay
+    const newAllowed = introducing || introducedToday(schedule, now) < newPerDay
 
     // 0 = due, 1 = new, 2 = learning and due soon, 'practice' = review card not due, null = stop.
     const classify = (card: Card): number | 'practice' | null => {
