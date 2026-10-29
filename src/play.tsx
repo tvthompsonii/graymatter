@@ -8,7 +8,14 @@ import type {
     SquareHandlerArgs,
 } from 'react-chessboard'
 
-import { boardChrome, customPieces, LEGAL_TARGET_STYLE, MOVE_ANIMATION_MS } from './boardTheme'
+import {
+    boardChrome,
+    checkmatedKingSquare,
+    CHECKMATE_KING_STYLE,
+    customPieces,
+    LEGAL_TARGET_STYLE,
+    MOVE_ANIMATION_MS,
+} from './boardTheme'
 import { Button } from './ui/controls'
 import { BotIcon, PlusIcon } from './ui/icons'
 import { BoardPage, Card, PanelHeader, Section, SideMarker, StatusBanner } from './ui/layout'
@@ -61,26 +68,6 @@ function pickBlackMove(game: Chess, moves: VerboseMove[]): VerboseMove {
     return pickRandom(moves)
 }
 
-function findKingSquare(game: Chess, color: 'w' | 'b'): string | null {
-    const board = game.board()
-    for (let rank = 0; rank < 8; rank++) {
-        for (let file = 0; file < 8; file++) {
-            const piece = board[rank]?.[file]
-            if (piece?.type === 'k' && piece.color === color) {
-                return `${String.fromCharCode(97 + file)}${8 - rank}`
-            }
-        }
-    }
-    return null
-}
-
-/** Soft red disc behind a checkmated king (Lichess-style). */
-const CHECKMATE_KING_STYLE: CSSProperties = {
-    background:
-        'radial-gradient(ellipse at center, rgba(235, 60, 60, 0.90) 0%, rgba(235, 60, 60, 0.75) 45%, transparent 70%)',
-}
-
-
 export type PlayStatus = {
     kind: 'your-move' | 'check' | 'bot' | 'checkmate' | 'draw'
     /** Set when kind is 'checkmate'. */
@@ -124,7 +111,14 @@ export function PlayChessboard({ boardId, onStatusChange }: PlayChessboardProps)
     const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
     const [optionSquares, setOptionSquares] = useState<Record<string, CSSProperties>>({})
     const [lastMoveSquares, setLastMoveSquares] = useState<{ from?: string; to?: string }>({})
+    // The ref is read inside handlers; the state re-renders the board so react-chessboard,
+    // which decides draggability at render time, sees the change.
     const busyRef = useRef(false)
+    const [busy, setBusyState] = useState(false)
+    const setBusy = useCallback((value: boolean) => {
+        busyRef.current = value
+        setBusyState(value)
+    }, [])
 
     const clearSelection = useCallback(() => {
         setSelectedSquare(null)
@@ -164,7 +158,6 @@ export function PlayChessboard({ boardId, onStatusChange }: PlayChessboardProps)
         game.move(pick)
         setFen(game.fen())
         setLastMoveSquares({ from: pick.from, to: pick.to })
-        await wait(MOVE_ANIMATION_MS)
     }, [])
 
     const attemptWhiteMove = useCallback((
@@ -200,20 +193,21 @@ export function PlayChessboard({ boardId, onStatusChange }: PlayChessboardProps)
         setFen(game.fen())
         setLastMoveSquares({ from: move.from, to: move.to })
 
-        busyRef.current = true
+        setBusy(true)
         void (async () => {
             await wait(MOVE_ANIMATION_MS)
             await playBlackMove()
-            busyRef.current = false
+            // Unlock as soon as the bot's move is on the board, while it's still animating.
+            setBusy(false)
         })()
 
         return true
-    }, [clearSelection, playBlackMove])
+    }, [clearSelection, playBlackMove, setBusy])
 
     const canDragPiece = useCallback(({ piece }: PieceHandlerArgs): boolean => {
-        if (busyRef.current) return false
+        if (busy) return false
         return piece.pieceType[0] === 'w' && gameRef.current.turn() === 'w'
-    }, [])
+    }, [busy])
 
     const onPieceDrag = useCallback(({ square }: PieceHandlerArgs) => {
         if (!square) return
@@ -254,9 +248,7 @@ export function PlayChessboard({ boardId, onStatusChange }: PlayChessboardProps)
         }
     }, [attemptWhiteMove, clearSelection, getMoveOptions, selectedSquare])
 
-    const checkmateKingSquare = gameRef.current.isCheckmate()
-        ? findKingSquare(gameRef.current, gameRef.current.turn())
-        : null
+    const checkmateKingSquare = checkmatedKingSquare(gameRef.current)
 
     const highlights = {
         ...optionSquares,

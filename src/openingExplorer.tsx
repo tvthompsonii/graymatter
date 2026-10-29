@@ -11,6 +11,8 @@ import type {
 
 import {
     boardChrome,
+    checkmatedKingSquare,
+    CHECKMATE_KING_STYLE,
     customPieces,
     HINT_SQUARE_STYLE,
     LEGAL_TARGET_STYLE,
@@ -219,6 +221,7 @@ export function ExploreChessboard({ root, side, path, onPlay, hoveredSan = null 
             }),
         },
         [
+            [wrong ? null : checkmatedKingSquare(new Chess(node.fen)), CHECKMATE_KING_STYLE],
             [endOfLine && lastMove && !wrong ? lastMove.to : null, HINT_SQUARE_STYLE],
             [selectedSquare, SELECTED_SQUARE_STYLE],
             [wrong?.square ?? null, WRONG_SQUARE_STYLE],

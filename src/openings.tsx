@@ -11,6 +11,8 @@ import type {
 
 import {
     boardChrome,
+    checkmatedKingSquare,
+    CHECKMATE_KING_STYLE,
     CORRECT_MOVE_DISPLAY_MS,
     customPieces,
     HINT_SQUARE_STYLE,
@@ -232,13 +234,17 @@ export function CardChessboard({
         onHistoryChangeRef.current?.([...historySansRef.current])
     }, [fen, historySansRef])
 
-    const applyBookMove = useCallback(async (san: string, runId: number): Promise<boolean> => {
+    /**
+     * Plays one book move. `settle` waits out its animation; the last move before the trainee's
+     * turn passes false, so the card comes up (and input unlocks) while that piece is still moving.
+     */
+    const applyBookMove = useCallback(async (san: string, runId: number, settle = true): Promise<boolean> => {
         try {
             const move = gameRef.current.move(san, { strict: false })
             historySansRef.current.push(move.san)
             setFen(gameRef.current.fen())
             setLastMoveSquares({ from: move.from, to: move.to })
-            await wait(MOVE_ANIMATION_MS)
+            if (settle) await wait(MOVE_ANIMATION_MS)
             return runId === runIdRef.current
         }
         catch {
@@ -306,9 +312,9 @@ export function CardChessboard({
         void (async () => {
             // Let the remounted board render the start position before the first move animates.
             await wait(100)
-            for (const san of setupSans) {
+            for (const [i, san] of setupSans.entries()) {
                 if (runId !== runIdRef.current) return
-                if (!(await applyBookMove(san, runId))) return
+                if (!(await applyBookMove(san, runId, i < setupSans.length - 1))) return
             }
             if (runId !== runIdRef.current) return
             settingUpRef.current = false
@@ -416,9 +422,9 @@ export function CardChessboard({
         }
         void (async () => {
             await wait(MOVE_ANIMATION_MS)
-            for (const san of chain.sans) {
+            for (const [i, san] of chain.sans.entries()) {
                 if (runId !== runIdRef.current) return
-                if (!(await applyBookMove(san, runId))) return
+                if (!(await applyBookMove(san, runId, i < chain.sans.length - 1))) return
             }
             if (runId === runIdRef.current) showCard(chain.card, chain.practice)
         })()
@@ -500,6 +506,7 @@ export function CardChessboard({
             }),
         },
         [
+            [checkmatedKingSquare(gameRef.current), CHECKMATE_KING_STYLE],
             [hintSquare, HINT_SQUARE_STYLE],
             [selectedSquare, SELECTED_SQUARE_STYLE],
             [wrongSquare, WRONG_SQUARE_STYLE],

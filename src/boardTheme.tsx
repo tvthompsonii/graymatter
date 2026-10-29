@@ -1,3 +1,4 @@
+import type { Chess } from 'chess.js'
 import type { CSSProperties } from 'react'
 import type { PieceRenderObject } from 'react-chessboard'
 
@@ -16,6 +17,30 @@ export const HINT_SQUARE_STYLE: CSSProperties = { boxShadow: 'inset 0 0 0 4px rg
 export const SOLUTION_ARROW_COLOR = 'rgba(34, 197, 94, 0.85)'
 
 export const WRONG_SQUARE_STYLE: CSSProperties = { boxShadow: 'inset 0 0 0 4px rgba(239, 68, 68, 0.9)' }
+
+/** Soft red disc behind a checkmated king (Lichess-style). */
+export const CHECKMATE_KING_STYLE: CSSProperties = {
+    background:
+        'radial-gradient(ellipse at center, rgba(235, 60, 60, 0.90) 0%, rgba(235, 60, 60, 0.75) 45%, transparent 70%)',
+}
+
+export function findKingSquare(game: Chess, color: 'w' | 'b'): string | null {
+    const board = game.board()
+    for (let rank = 0; rank < 8; rank++) {
+        for (let file = 0; file < 8; file++) {
+            const piece = board[rank]?.[file]
+            if (piece?.type === 'k' && piece.color === color) {
+                return `${String.fromCharCode(97 + file)}${8 - rank}`
+            }
+        }
+    }
+    return null
+}
+
+/** The checkmated king's square, or null when the side to move isn't mated. */
+export function checkmatedKingSquare(game: Chess): string | null {
+    return game.isCheckmate() ? findKingSquare(game, game.turn()) : null
+}
 
 /**
  * While a piece is dragged, the square under it sets this CSS variable (via `dropSquareStyle`);

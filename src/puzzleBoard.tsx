@@ -10,6 +10,8 @@ import type {
 
 import {
     boardChrome,
+    checkmatedKingSquare,
+    CHECKMATE_KING_STYLE,
     customPieces,
     HINT_SQUARE_STYLE,
     LEGAL_TARGET_STYLE,
@@ -107,7 +109,14 @@ export function PuzzleChessboard({
     const gameRef = useRef(new Chess())
     const moveIndexRef = useRef(0)
     const runIdRef = useRef(0)
+    // The ref is read inside handlers; the state re-renders the board so react-chessboard,
+    // which decides draggability at render time, sees the change.
     const busyRef = useRef(false)
+    const [busy, setBusyState] = useState(false)
+    const setBusy = useCallback((value: boolean) => {
+        busyRef.current = value
+        setBusyState(value)
+    }, [])
     const onSolvedRef = useRef(onSolved)
     onSolvedRef.current = onSolved
     const onPlaySolutionCompleteRef = useRef(onPlaySolutionComplete)
@@ -141,6 +150,8 @@ export function PuzzleChessboard({
         uci: string,
         runId: number,
         extraPauseMs = 0,
+        /** Wait for the move's animation before resolving; false resolves as soon as it's applied. */
+        settle = true,
     ): Promise<boolean> => {
         const parsed = parseUci(uci)
         if (!parsed) return false
@@ -154,6 +165,7 @@ export function PuzzleChessboard({
             if (!move) return false
             moveIndexRef.current++
             syncBoard(gameRef.current, { from: move.from, to: move.to })
+            if (!settle) return runId === runIdRef.current
             await wait(MOVE_ANIMATION_MS)
             if (runId !== runIdRef.current) return false
             if (extraPauseMs > 0) await wait(extraPauseMs)
@@ -164,10 +176,11 @@ export function PuzzleChessboard({
         }
     }, [syncBoard])
 
+    // The trainee moves next, so don't wait out the animation: they can grab a piece right away.
     const playComputerUci = useCallback(async (
         uci: string,
         runId: number,
-    ): Promise<boolean> => playUci(uci, runId), [playUci])
+    ): Promise<boolean> => playUci(uci, runId, 0, false), [playUci])
 
     const finishPuzzle = useCallback(async (runId: number) => {
         await wait(1000)
@@ -175,7 +188,7 @@ export function PuzzleChessboard({
     }, [])
 
     const playSolution = useCallback(async (runId: number) => {
-        busyRef.current = true
+        setBusy(true)
         clearSelection()
         clearHint()
 
@@ -194,11 +207,11 @@ export function PuzzleChessboard({
         }
         finally {
             if (runId === runIdRef.current) {
-                busyRef.current = false
+                setBusy(false)
                 onPlaySolutionCompleteRef.current?.(success)
             }
         }
-    }, [clearHint, clearSelection, playUci, puzzle])
+    }, [clearHint, clearSelection, playUci, puzzle, setBusy])
 
     const continueAfterPlayerMove = useCallback(async (runId: number) => {
         const { moves } = puzzle
@@ -210,13 +223,13 @@ export function PuzzleChessboard({
             }
             return
         }
-        busyRef.current = false
+        setBusy(false)
         await finishPuzzle(runId)
-    }, [finishPuzzle, playComputerUci, playerColor, puzzle])
+    }, [finishPuzzle, playComputerUci, playerColor, puzzle, setBusy])
 
     const startPuzzle = useCallback(async () => {
         const runId = ++runIdRef.current
-        busyRef.current = true
+        setBusy(true)
         clearSelection()
         clearHint()
         setLastMoveSquares({})
@@ -227,18 +240,18 @@ export function PuzzleChessboard({
         setBoardKey((key) => key + 1)
 
         if (!puzzle.moves.length) {
-            busyRef.current = false
+            setBusy(false)
             return
         }
 
         if (!(await playComputerUci(puzzle.moves[0]!, runId))) {
-            busyRef.current = false
+            setBusy(false)
             return
         }
 
-        busyRef.current = false
+        setBusy(false)
         await continueAfterPlayerMove(runId)
-    }, [clearHint, clearSelection, continueAfterPlayerMove, playComputerUci, puzzle, syncBoard])
+    }, [clearHint, clearSelection, continueAfterPlayerMove, playComputerUci, puzzle, setBusy, syncBoard])
 
     useEffect(() => {
         if (!hintTrigger) return
@@ -322,7 +335,7 @@ export function PuzzleChessboard({
             clearHint()
             setWrongSquare(targetSquare)
             syncBoard(game, { from: move.from, to: move.to })
-            busyRef.current = true
+            setBusy(true)
             onMissRef.current()
             return true
         }
@@ -336,14 +349,14 @@ export function PuzzleChessboard({
             clearSelection()
             setWrongSquare(targetSquare)
             setFen(wrongFen)
-            busyRef.current = true
+            setBusy(true)
             const runId = runIdRef.current
             void (async () => {
                 await wait(WRONG_MOVE_DISPLAY_MS)
                 setWrongSquare(null)
                 // A newer run (e.g. Next puzzle playing the solution) owns the board now.
                 if (runId !== runIdRef.current) return
-                busyRef.current = false
+                setBusy(false)
                 syncBoard(gameRef.current)
             })()
             return true
@@ -355,12 +368,12 @@ export function PuzzleChessboard({
         syncBoard(game, { from: move.from, to: move.to })
 
         const runId = runIdRef.current
-        busyRef.current = true
+        setBusy(true)
         void (async () => {
             await wait(MOVE_ANIMATION_MS)
             if (runId !== runIdRef.current) return
             await continueAfterPlayerMove(runId)
-            busyRef.current = false
+            setBusy(false)
         })()
 
         return true
@@ -370,13 +383,14 @@ export function PuzzleChessboard({
         continueAfterPlayerMove,
         playerColor,
         puzzle.moves,
+        setBusy,
         syncBoard,
     ])
 
     const canDragPiece = useCallback(({ piece }: PieceHandlerArgs): boolean => {
-        if (busyRef.current) return false
+        if (busy) return false
         return piece.pieceType[0] === playerColor && gameRef.current.turn() === playerColor
-    }, [playerColor])
+    }, [busy, playerColor])
 
     const onPieceDrag = useCallback(({ square }: PieceHandlerArgs) => {
         if (!square) return
@@ -428,6 +442,7 @@ export function PuzzleChessboard({
             }),
         },
         [
+            [checkmatedKingSquare(gameRef.current), CHECKMATE_KING_STYLE],
             [hintSquare, HINT_SQUARE_STYLE],
             [selectedSquare, SELECTED_SQUARE_STYLE],
             [wrongSquare, WRONG_SQUARE_STYLE],
