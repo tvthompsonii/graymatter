@@ -12,7 +12,7 @@ const isDev = !app.isPackaged
 
 // Data lives in Google Drive (synced locally, "Available offline") so desktop and
 // laptop share the same repertoires, settings, and progress.
-const GRAYMATTER_DIR = 'G:/My Drive/Tom/Chess/GrayMatter'
+const GRAYMATTER_DIR = 'G:/My Drive/Chess/GrayMatter'
 
 const PATHS = {
     whitePgn: path.join(GRAYMATTER_DIR, 'WhiteDenormalized.pgn'),
